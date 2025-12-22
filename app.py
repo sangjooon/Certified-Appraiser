@@ -2,11 +2,12 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 import re
+import io
 from dataclasses import dataclass
 from typing import List
 
 # ==========================================
-# 1. 데이터 구조
+# 1. 데이터 구조 정의
 # ==========================================
 @dataclass
 class RealEstateDocument:
@@ -28,59 +29,47 @@ class AnalysisResult:
     issue_type: str
 
 # ==========================================
-# 2. 파싱 엔진 (세로/가로 전방위 탐색)
+# 2. 파싱 엔진 (세로/가로 전방위 탐색 - 성능 유지)
 # ==========================================
 class RealParser:
     @staticmethod
     def clean_text(text):
         if not text: return ""
         text = re.sub(r'([가-힣])\1', r'\1', text) # 중복 글자 제거
-        return text.replace("\n", "").replace(" ", "").strip() # 공백 싹 제거 (키워드 매칭용)
+        return text.replace("\n", "").replace(" ", "").strip()
 
     @staticmethod
     def extract_number(text):
-        """텍스트에서 가장 그럴듯한 면적 숫자 추출"""
+        """텍스트에서 면적 숫자 추출"""
         if not text: return 0.0
-        # 1,540.0 또는 477 같은 패턴 찾기
         matches = re.findall(r'(\d+(?:,\d+)*(?:\.\d+)?)', str(text))
         valid_nums = []
         for m in matches:
             val = float(m.replace(',', ''))
-            if val > 1.0: valid_nums.append(val) # 0이나 1 같은 순번 제외
-        
+            if val > 1.0: valid_nums.append(val)
         return max(valid_nums) if valid_nums else 0.0
 
     @staticmethod
     def find_value_in_table(tables, keywords):
-        """표에서 키워드를 찾고, [오른쪽] 또는 [아래]에 있는 값을 찾아냄"""
-        found_val = 0.0
-        
+        """표에서 키워드 주변 값 찾기 (아래, 오른쪽, 두칸 아래)"""
         for table in tables:
-            # 테이블을 DataFrame처럼 생각해서 순회
             n_rows = len(table)
-            n_cols = len(table[0]) if n_rows > 0 else 0
-            
             for r in range(n_rows):
                 for c in range(len(table[r])):
                     cell_text = RealParser.clean_text(str(table[r][c]))
-                    
-                    # 키워드 매칭 (예: "면적", "연면적")
                     if any(k in cell_text for k in keywords):
-                        # 전략 1: 바로 아래 칸 확인 (토지이용계획, 건축물대장 세로형)
+                        # 1. 바로 아래 (세로형)
                         if r + 1 < n_rows:
-                            val_below = RealParser.extract_number(table[r+1][c])
-                            if val_below > 0: return val_below
-                        
-                        # 전략 2: 바로 옆 칸 확인 (가로형)
+                            val = RealParser.extract_number(table[r+1][c])
+                            if val > 0: return val
+                        # 2. 바로 옆 (가로형)
                         if c + 1 < len(table[r]):
-                            val_right = RealParser.extract_number(table[r][c+1])
-                            if val_right > 0: return val_right
-                        
-                        # 전략 3: 두 칸 아래 확인 (중간에 단위가 끼어있는 경우)
+                            val = RealParser.extract_number(table[r][c+1])
+                            if val > 0: return val
+                        # 3. 두 칸 아래 (단위가 껴있는 경우)
                         if r + 2 < n_rows:
-                            val_below_2 = RealParser.extract_number(table[r+2][c])
-                            if val_below_2 > 0: return val_below_2
-
+                            val = RealParser.extract_number(table[r+2][c])
+                            if val > 0: return val
         return 0.0
 
     @staticmethod
@@ -93,64 +82,55 @@ class RealParser:
         doc_category = "미식별"
 
         with pdfplumber.open(file) as pdf:
-            # 1. 텍스트 추출 (Regex 백업용)
+            # 텍스트 추출
             for page in pdf.pages:
                 full_text += str(page.extract_text()) + "\n"
             
-            # 2. 문서 종류 판단
+            # 문서 종류 판단
             if "토지이용" in full_text or "신청토지" in full_text:
                 doc_category = "토지이용계획확인서"
                 area_keywords = ["면적", "신청토지면적"]
             elif "건축물대장" in full_text or "건물ID" in full_text:
                 doc_category = "건축물대장"
-                area_keywords = ["연면적", "건축면적"] # 건축물대장은 연면적이 핵심
+                area_keywords = ["연면적", "건축면적"]
             else:
                 doc_category = "등기부등본"
                 area_keywords = ["면적"]
 
-            # 3. 표(Table) 정밀 탐색 실행
+            # 표 정밀 탐색
             for page in pdf.pages:
                 tables = page.extract_tables()
-                
-                # 면적 찾기
                 if area == 0.0:
                     area = RealParser.find_value_in_table(tables, area_keywords)
                 
-                # 주소 찾기 (표 순회)
+                # 주소 찾기
                 if address == "인식 실패":
                     for table in tables:
                         for row in table:
                             row_clean = [RealParser.clean_text(str(x)) for x in row]
-                            # 소재지, 대지위치 찾기
                             if "소재지" in row_clean:
                                 idx = row_clean.index("소재지")
-                                # 옆 칸 확인
                                 if idx+1 < len(row) and row[idx+1]: 
                                     address = str(row[idx+1]).replace("\n"," ")
                             elif "대지위치" in row_clean:
                                 idx = row_clean.index("대지위치")
                                 if idx+1 < len(row) and row[idx+1]:
                                     address = str(row[idx+1]).replace("\n"," ")
-                                    # 중복 글자 제거 (발발급급 이슈)
                                     address = re.sub(r'([가-힣])\1', r'\1', address)
 
-        # 4. [최후의 수단] 표에서 0.0 나오면 텍스트에서 '㎡' 붙은 숫자 중 제일 큰 거 가져옴
+        # 백업: 텍스트에서 면적 찾기
         if area == 0.0:
-            # "숫자 + ㎡" 패턴 모두 찾기
             matches = re.findall(r'(\d+(?:,\d+)*(?:\.\d+)?)\s*㎡', full_text)
-            nums = []
-            for m in matches:
-                val = float(m.replace(',', ''))
-                if val > 1.0: nums.append(val)
-            if nums:
-                area = max(nums) # 보통 제일 큰 게 전체 면적임
+            nums = [float(m.replace(',', '')) for m in matches if float(m.replace(',', '')) > 1.0]
+            if nums: area = max(nums)
 
-        # 5. 소유자 (등기부만)
+        # 소유자 찾기
         if doc_category == "등기부등본":
             owners = list(set(re.findall(r'소유자\s+([가-힣]{2,4})', full_text)))
         elif doc_category == "건축물대장":
-            # 건축물대장 소유자 (성명)
             owners = list(set(re.findall(r'성명\s*([가-힣]{3})', full_text)))
+        else:
+            owners = ["(정보 없음)"]
 
         return RealEstateDocument(doc_hint, filename, full_text, address, area, owners, doc_category)
 
@@ -165,50 +145,94 @@ class RealEstateAnalyzer:
     def compare(self) -> List[AnalysisResult]:
         results = []
         
-        # 주소
+        # 1. 소재지
         a1 = self.d1.address.replace("경기도","").replace(" ","")
         a2 = self.d2.address.replace("경기도","").replace(" ","")
         match_addr = (a1 in a2) or (a2 in a1)
-        results.append(AnalysisResult("주소", match_addr, self.d1.address, self.d2.address, "일치" if match_addr else "확인 필요", "주소"))
+        results.append(AnalysisResult("소재지", match_addr, self.d1.address, self.d2.address, "일치" if match_addr else "확인 필요", "주소"))
 
-        # 면적
+        # 2. 면적
         diff = abs(self.d1.area - self.d2.area)
-        # 토지(1540) vs 건물(477)이면 당연히 다름 -> 경고 메시지만 다르게
         match_area = diff < 3.3
-        msg = "일치" if match_area else f"불일치 ({diff:.1f}㎡ 차이)"
+        msg = "일치" if match_area else f"오차 {diff:.1f}㎡"
         if "토지" in self.d1.doc_category and "건축물" in self.d2.doc_category:
-            msg += "\n(토지면적 vs 연면적 비교됨)"
-        
+            msg += "\n(참고: 토지 vs 건물)"
         results.append(AnalysisResult("면적(㎡)", match_area, str(self.d1.area), str(self.d2.area), msg, "면적"))
+
+        # 3. 소유자
+        if "토지이용" in self.d1.doc_category:
+             results.append(AnalysisResult("소유자", True, "-", str(self.d2.owners), "비교 제외 (토지이용계획)", "-"))
+        else:
+            match_owner = not set(self.d1.owners).isdisjoint(set(self.d2.owners))
+            results.append(AnalysisResult("소유자", match_owner, str(self.d1.owners), str(self.d2.owners), "일치" if match_owner else "불일치", "권리"))
 
         return results
 
 # ==========================================
-# 4. 실행
+# 4. 웹 UI (엑셀 버튼 복구 완료!)
 # ==========================================
 def main():
-    st.set_page_config(page_title="부동산 분석기 Fix", layout="wide")
-    st.title("📑 부동산 서류 분석기 (면적 인식 강화판)")
-    
+    st.set_page_config(page_title="부동산 정밀 분석기", layout="wide")
+    st.title("📑 부동산 공부 서류 정밀 분석기")
+    st.markdown("---")
+
+    # 사이드바
     with st.sidebar:
+        st.header("📂 파일 업로드")
         f1 = st.file_uploader("1. 등기부/토지이용계획", type=["pdf"])
         f2 = st.file_uploader("2. 건축물대장", type=["pdf"])
         btn = st.button("분석 실행", type="primary")
 
     if btn and f1 and f2:
-        d1 = RealParser.parse_universal(f1, "doc1")
-        d2 = RealParser.parse_universal(f2, "doc2")
-        
-        res = RealEstateAnalyzer(d1, d2).compare()
+        with st.spinner('문서 분석 및 엑셀 생성 중...'):
+            d1 = RealParser.parse_universal(f1, "doc1")
+            d2 = RealParser.parse_universal(f2, "doc2")
+            
+            analyzer = RealEstateAnalyzer(d1, d2)
+            res = analyzer.compare()
 
-        c1, c2 = st.columns(2)
-        c1.success(f"**{d1.doc_category}**\n\n주소: {d1.address}\n면적: {d1.area}㎡")
-        c2.info(f"**{d2.doc_category}**\n\n주소: {d2.address}\n면적: {d2.area}㎡")
+            # 1. 요약 정보 카드
+            c1, c2 = st.columns(2)
+            c1.success(f"**📄 {d1.doc_category}**\n\n- 주소: {d1.address}\n- 면적: {d1.area}㎡")
+            c2.info(f"**📄 {d2.doc_category}**\n\n- 주소: {d2.address}\n- 면적: {d2.area}㎡")
 
-        st.table(pd.DataFrame([
-            {"항목":r.category, "결과":"✅" if r.is_match else "⚠️", "문서1":r.registry_val, "문서2":r.ledger_val, "내용":r.message}
-            for r in res
-        ]))
+            st.divider()
+
+            # 2. 상세 결과 데이터프레임 생성
+            st.subheader("📊 분석 결과 리포트")
+            
+            data_rows = []
+            for r in res:
+                data_rows.append({
+                    "분석 항목": r.category,
+                    "판정": "✅ Pass" if r.is_match else "❌ Check",
+                    "문서1 내용": r.registry_val,
+                    "문서2 내용": r.ledger_val,
+                    "비고 (분석결과)": r.message
+                })
+            
+            df = pd.DataFrame(data_rows)
+            st.table(df)
+
+            # 3. 엑셀 다운로드 버튼 (부활!)
+            st.subheader("💾 리포트 다운로드")
+            
+            # 엑셀 파일 메모리 생성
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='분석결과')
+            
+            st.download_button(
+                label="📥 엑셀 파일로 다운로드 (.xlsx)",
+                data=output.getvalue(),
+                file_name="부동산_분석_결과.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+            # 4. 디버깅용 텍스트
+            with st.expander("🔍 원본 텍스트 확인하기"):
+                st.text_area("문서 1 Raw Text", d1.raw_text[:500])
+                st.text_area("문서 2 Raw Text", d2.raw_text[:500])
 
 if __name__ == "__main__":
     main()
