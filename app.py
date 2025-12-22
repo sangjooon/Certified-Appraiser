@@ -34,8 +34,8 @@ class RealParser:
     @staticmethod
     def clean_text(text):
         if not text: return ""
-        # 1. '발발급급' -> '발급' (한글 중복 글자 제거)
-        # 같은 한글이 연속 2번 나오면 하나로 줄임
+        # 1. '발발급급' -> '발급' (한글 중복 글자 제거 로직)
+        # 한글이 연속으로 똑같이 2번 나오면 하나로 줄입니다.
         text = re.sub(r'([가-힣])\1', r'\1', text)
         
         # 2. 줄바꿈 및 불필요한 공백 제거
@@ -45,7 +45,7 @@ class RealParser:
 
     @staticmethod
     def parse_ledger(file) -> RealEstateDocument:
-        """건축물대장 파싱 (표 형식 최적화)"""
+        """건축물대장 파싱 (표 형식 최적화 + 중복 글자 보정)"""
         filename = file.name
         full_text = ""
         
@@ -56,58 +56,60 @@ class RealParser:
 
         with pdfplumber.open(file) as pdf:
             for page in pdf.pages:
-                # 텍스트 추출 (중복 제거 전처리 적용)
+                # 텍스트 추출 (중복 제거 전처리 적용 - 디버깅용)
                 extracted = page.extract_text()
                 if extracted:
                     full_text += RealParser.clean_text(extracted) + "\n"
 
-                # [표 추출 로직]
+                # [표 추출 로직] - 건축물대장은 표(Grid)로 읽어야 정확합니다.
                 tables = page.extract_tables()
                 for table in tables:
                     for row in table:
-                        # 빈 칸(None)을 빈 문자열("")로 변환하고 정리
-                        row_clean = [str(cell).replace("\n", "").replace(" ", "") if cell else "" for cell in row]
+                        # 빈 칸(None) 처리 및 텍스트 정리
+                        row_clean = []
+                        for cell in row:
+                            if cell:
+                                # 셀 내부의 중복 글자도 보정 ('발발급급' -> '발급')
+                                cleaned_cell = RealParser.clean_text(str(cell))
+                                row_clean.append(cleaned_cell.replace(" ", "")) # 검색용은 공백 제거
+                            else:
+                                row_clean.append("")
                         
-                        # (1) 주소 (대지위치/도로명주소)
+                        # (1) 주소 (대지위치) 찾기
                         if "대지위치" in row_clean:
                             try:
                                 idx = row_clean.index("대지위치")
+                                # 보통 대지위치 바로 다음 칸에 주소가 있음
                                 if idx + 1 < len(row) and row[idx+1]:
-                                    val = row[idx+1].replace("\n", " ")
-                                    # 중복 글자 보정
-                                    address = re.sub(r'([가-힣])\1', r'\1', val).strip()
+                                    val = RealParser.clean_text(str(row[idx+1]))
+                                    address = val
                             except: pass
                         
-                        # (2) 연면적 (건축물대장의 핵심 면적)
+                        # (2) 연면적 찾기
                         if "연면적" in row_clean:
                             try:
                                 idx = row_clean.index("연면적")
                                 if idx + 1 < len(row) and row[idx+1]:
-                                    # 숫자만 추출
+                                    # 숫자만 추출 (ex: 477 m -> 477.0)
                                     nums = re.findall(r'(\d+(?:,\d+)*(?:\.\d+)?)', str(row[idx+1]))
                                     if nums: area = float(nums[0].replace(',', ''))
                             except: pass
 
-                        # (3) 소유자 (성명)
-                        # 표 안에 '성명(명칭)' 컬럼이 있는 경우
-                        if "성명(명칭)" in row_clean:
-                            try:
-                                name_idx = row_clean.index("성명(명칭)")
-                                # 보통 소유자 정보는 헤더 바로 아래 줄에 나옴 (다음 loop에서 처리되거나 구조가 복잡함)
-                                # 여기서는 간이로 같은 행에 데이터가 있는지 확인 (드물지만)
-                                pass
-                            except: pass
-                            
-                # 소유자 추출 (텍스트 기반 보완)
-                # '성명(명칭)' 뒤에 오는 이름 패턴 찾기
-                # 예: "성명(명칭) 변동일 ... 홍길동 2021..."
-                if "성명" in full_text:
-                    # 건축물대장 전용 패턴: 성명(명칭) 뒤에 나오는 한글 이름
-                    matches = re.findall(r'성명\(명칭\).*?([가-힣]{3})\s+\d{4}\.', full_text)
-                    if matches:
-                        owners.extend(matches)
+                        # (3) 소유자 (성명) 찾기
+                        # 표 안에 '성명'이라는 값이 있으면 그 행이나 다음 행의 값을 가져옴
+                        if "성명" in row_clean or "성명(명칭)" in row_clean:
+                            # 이 부분은 표 구조가 복잡하여 텍스트 검색으로 보완합니다.
+                            pass
 
-        # 소유자 중복 제거
+            # 소유자 추출 보완 (텍스트 패턴 매칭)
+            # 건축물대장 패턴: "성명(명칭) ... 홍길동"
+            if "성명" in full_text:
+                # 성명 뒤에 나오는 한글 3글자(이름) 추출 시도
+                matches = re.findall(r'성명.*?([가-힣]{3})\s', full_text)
+                if matches:
+                    owners.extend(matches)
+
+        # 소유자 중복 제거 및 기본값
         owners = list(set(owners))
         if not owners: owners = ["(대장상 소유자 미상)"]
 
@@ -115,13 +117,13 @@ class RealParser:
 
     @staticmethod
     def parse_registry_or_plan(file) -> RealEstateDocument:
-        """등기부등본 또는 토지이용계획확인서 파싱"""
+        """등기부등본 또는 토지이용계획확인서 자동 판별 파싱"""
         filename = file.name
         full_text = ""
         address = "인식 실패"
         area = 0.0
         owners = []
-        doc_cat = "알 수 없음"
+        doc_cat = "문서 종류 미상"
 
         with pdfplumber.open(file) as pdf:
             for page in pdf.pages:
@@ -136,18 +138,19 @@ class RealParser:
                     for row in table:
                         row_str = [str(c).replace("\n","").replace(" ","") if c else "" for c in row]
                         
-                        # [케이스 1] 토지이용계획확인서 (보내주신 파일이 이것임)
+                        # [문서 종류 판별] 토지이용계획확인서 키워드 확인
                         if "토지이용계획확인서" in row_str or "신청토지" in row_str:
                             doc_cat = "토지이용계획확인서"
                         
+                        # (1) 주소 (소재지)
                         if "소재지" in row_str:
                             try:
                                 idx = row_str.index("소재지")
                                 if idx + 1 < len(row) and row[idx+1]:
-                                    address = str(row[idx+1]).replace("\n", " ").strip()
+                                    address = RealParser.clean_text(str(row[idx+1]))
                             except: pass
                         
-                        # 면적 (토지이용계획확인서에는 '면적(㎡)'로 표기됨)
+                        # (2) 면적 (면적(㎡) 또는 면적)
                         if "면적(㎡)" in row_str or "면적" in row_str:
                             try:
                                 for cell in row:
@@ -156,24 +159,24 @@ class RealParser:
                                         nums = re.findall(r'(\d+(?:,\d+)*(?:\.\d+)?)', str(cell))
                                         if nums:
                                             val = float(nums[0].replace(',', ''))
-                                            # 너무 작은 숫자(번호 등) 제외
-                                            if val > 10: area = val
+                                            # 너무 작은 숫자(순번 등) 제외
+                                            if val > 1.0: area = val
                             except: pass
 
-        # 문서 종류 확정 (텍스트 기반)
+        # 문서 종류 확정 (텍스트 기반 2차 확인)
         if "토지이용계획확인서" in full_text:
             doc_cat = "토지이용계획확인서"
         elif "등기사항전부증명서" in full_text:
             doc_cat = "등기부등본"
 
         # [소유자 찾기] 
-        # 토지이용계획확인서에는 보통 '소유자' 칸이 없습니다. (신청인만 있음)
-        # 등기부등본인 경우에만 소유자를 찾음
+        # 토지이용계획확인서에는 보통 '소유자' 칸이 없고 '신청인'만 있습니다.
+        # 따라서 등기부등본인 경우에만 소유자를 찾습니다.
         if doc_cat == "등기부등본":
             found = re.findall(r'소유자\s+([가-힣]{2,4})', full_text)
             owners = list(set(found))
         else:
-            owners = ["(토지이용계획서는 소유자 정보 없음)"]
+            owners = ["(토지이용계획서 - 소유자 정보 없음)"]
 
         return RealEstateDocument("registry", filename, full_text, address, area, owners, doc_cat)
 
@@ -194,7 +197,7 @@ class RealEstateAnalyzer:
         addr2 = self.doc2.address.replace("경기도", "").replace(" ", "")
         
         match_addr = (addr1 in addr2) or (addr2 in addr1)
-        if self.doc1.address == "인식 실패" or self.doc2.address == "인식 실패":
+        if "실패" in self.doc1.address or "실패" in self.doc2.address:
             match_addr = False
             msg_addr = "⚠️ 주소 텍스트 추출 실패"
         else:
@@ -213,7 +216,7 @@ class RealEstateAnalyzer:
             msg_area = f"불일치 ({diff:.1f}㎡ 차이)"
             # 문서 종류에 따른 안내 메시지
             if "토지이용" in self.doc1.doc_category and "건축물" in self.doc2.doc_category:
-                 msg_area += "\n(참고: 토지면적 vs 연면적 비교임)"
+                 msg_area += "\n(참고: 토지면적 vs 건물연면적 비교임)"
 
         results.append(AnalysisResult("면적(㎡)", match_area, str(self.doc1.area), str(self.doc2.area), msg_area, "확인필요"))
 
@@ -261,9 +264,9 @@ def main():
             # 결과 화면
             c1, c2 = st.columns(2)
             with c1:
-                st.info(f"**📂 파일 1: {doc1.doc_category}**\n- 주소: {doc1.address}\n- 면적: {doc1.area}㎡")
+                st.info(f"**📂 파일 1 인식결과: [{doc1.doc_category}]**\n- 주소: {doc1.address}\n- 면적: {doc1.area}㎡")
             with c2:
-                st.success(f"**📂 파일 2: {doc2.doc_category}**\n- 주소: {doc2.address}\n- 면적: {doc2.area}㎡")
+                st.success(f"**📂 파일 2 인식결과: [{doc2.doc_category}]**\n- 주소: {doc2.address}\n- 면적: {doc2.area}㎡")
 
             st.divider()
             st.subheader("📊 분석 결과 리포트")
@@ -279,7 +282,7 @@ def main():
                 })
             st.table(pd.DataFrame(data))
 
-            # 디버깅용 텍스트 확인
+            # 디버깅용 텍스트 확인 (중복 제거된 텍스트 확인)
             with st.expander("🔍 AI가 읽은 보정된 텍스트 확인 (중복 글자 제거됨)"):
                 st.text_area(f"{doc1.doc_category} Raw Text", doc1.raw_text[:1000], height=200)
                 st.text_area(f"{doc2.doc_category} Raw Text", doc2.raw_text[:1000], height=200)
