@@ -11,8 +11,8 @@ import re
 # 배포 시엔 st.secrets를 쓰고, 로컬 테스트엔 사이드바 입력을 받도록 처리
 def get_api_keys():
     try:
-        api_url = st.secrets["NAVER_API_URL"]
-        secret_key = st.secrets["NAVER_SECRET_KEY"]
+        api_url = st.secrets["https://256fchanms.apigw.ntruss.com/custom/v1/49135/3f2ae1de29f9f0e8b6e8c840352f097ee1cef380b0e067a48b03e5ac512d4332/general"]
+        secret_key = st.secrets["d292eExXQnVac3BCbkh2Y1J3eXNYbFNCWVZlUVRGV24="]
         return api_url, secret_key
     except:
         return None, None
@@ -140,3 +140,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
