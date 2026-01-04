@@ -1,178 +1,142 @@
 import streamlit as st
 import requests
-import pandas as pd
 import uuid
 import time
 import json
 import re
-import io
-from io import BytesIO
 
-# --------------------------------------------------------------------------
-# 1. 설정 및 네이버 OCR 호출 함수
-# --------------------------------------------------------------------------
+# ==========================================
+# 1. 설정: 네이버 API 키 가져오기
+# ==========================================
+# 배포 시엔 st.secrets를 쓰고, 로컬 테스트엔 사이드바 입력을 받도록 처리
+def get_api_keys():
+    try:
+        api_url = st.secrets["NAVER_API_URL"]
+        secret_key = st.secrets["NAVER_SECRET_KEY"]
+        return api_url, secret_key
+    except:
+        return None, None
 
+# ==========================================
+# 2. 기능: 네이버 OCR 호출
+# ==========================================
+def call_naver_ocr(uploaded_file, api_url, secret_key):
+    # 파일 확장자에 따라 포맷 결정
+    file_ext = uploaded_file.name.split('.')[-1].lower()
+    format_type = file_ext if file_ext in ['jpg', 'png', 'jpeg'] else 'pdf'
 
-def call_naver_ocr(file_bytes, file_format, api_url, secret_key):
-    """
-    네이버 CLOVA OCR API를 호출하는 함수
-    """
     request_json = {
-        "images": [{"format": file_format, "name": "demo"}],
-        "requestId": str(uuid.uuid4()),
-        "version": "V2",
-        "timestamp": int(round(time.time() * 1000)),
+        'images': [{'format': format_type, 'name': 'demo'}],
+        'requestId': str(uuid.uuid4()),
+        'version': 'V2',
+        'timestamp': int(round(time.time() * 1000))
     }
 
-    payload = {"message": json.dumps(request_json).encode("UTF-8")}
-    files = [("file", file_bytes)]
-    headers = {"X-OCR-SECRET": secret_key}
+    payload = {'message': json.dumps(request_json).encode('UTF-8')}
+    headers = {'X-OCR-SECRET': secret_key}
 
     try:
+        files = [('file', (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type))]
         response = requests.post(api_url, headers=headers, data=payload, files=files)
-        response.raise_for_status()  # 에러 발생 시 예외 처리
-        return response.json()
+        
+        if response.status_code == 200:
+            result = response.json()
+            full_text = ""
+            for image in result.get("images", []):
+                for field in image.get("fields", []):
+                    full_text += field.get("inferText", "") + " "
+            return full_text
+        else:
+            return None
     except Exception as e:
-        st.error(f"OCR API 호출 중 오류 발생: {str(e)}")
         return None
 
+# ==========================================
+# 3. 기능: 면적 숫자만 추출 (Regex)
+# ==========================================
+def find_land_area(text):
+    if not text: return 0.0
+    
+    # 1. 숫자 + ㎡ 패턴 찾기 (예: 123.45㎡, 1,234.5 ㎡)
+    # 토지 등기부의 핵심은 '표제부'의 면적이므로, 보통 문서 상단에 나오거나 
+    # 여러 면적 중 가장 큰 값이 대지 면적일 확률이 높음.
+    matches = re.findall(r'(\d+(?:,\d+)*(?:\.\d+)?)\s*㎡', text)
+    
+    valid_areas = []
+    for m in matches:
+        clean_num = float(m.replace(',', ''))
+        # 0.1㎡ 미만은 오인식일 수 있으니 제외
+        if clean_num > 0.1:
+            valid_areas.append(clean_num)
+            
+    if valid_areas:
+        # 팁: 등기부엔 1층 면적, 2층 면적 등도 나올 수 있지만 
+        # 토지 등기에서 가장 중요한 '대지권'이나 '토지 면적'은 보통 가장 큰 수치임.
+        # (필요시 로직 수정 가능)
+        return max(valid_areas)
+    else:
+        return 0.0
 
-# --------------------------------------------------------------------------
-# 2. 토지대장 파싱 로직 (핵심)
-# --------------------------------------------------------------------------
-
-
-def parse_land_ledger(ocr_result):
-    """
-    OCR 결과(JSON)에서 토지대장의 주요 항목을 추출하여 DataFrame으로 변환
-    *참고: 실제 토지대장 양식에 따라 정규표현식(Regex)을 정교하게 다듬어야 합니다.*
-    """
-    if not ocr_result or "images" not in ocr_result:
-        return pd.DataFrame()
-
-    # 1. 전체 텍스트를 하나의 문자열로 결합 (위치 기반으로 정렬된 상태 가정)
-    all_text = ""
-    fields = ocr_result["images"][0]["fields"]
-
-    # y좌표 순서대로 정렬 (줄 단위 인식) -> x좌표 순서대로 정렬
-    # 네이버 OCR은 기본적으로 읽는 순서를 어느정도 맞춰주지만, 확실하게 하기 위함
-    # fields.sort(key=lambda x: (x['boundingPoly']['vertices'][0]['y'], x['boundingPoly']['vertices'][0]['x']))
-
-    for field in fields:
-        all_text += field["inferText"] + " "
-
-    # 2. 정규표현식을 이용한 데이터 추출 (예시)
-    data = {}
-
-    # (1) 소재지 추출 (예: 경기도 성남시...)
-    # '소재지' 또는 '토지 소재' 뒤에 나오는 주소 패턴 찾기
-    address_match = re.search(
-        r"(소재지|토지\s*소재)\s*[:]?\s*([가-힣]+[시도].*?)(?=\s지\s*번|\s지\s*목|$)",
-        all_text,
-    )
-    data["소재지"] = address_match.group(2).strip() if address_match else "인식 실패"
-
-    # (2) 지목 추출 (예: 대, 전, 답, 임야)
-    jimok_match = re.search(r"지\s*목\s*[:]?\s*([가-힣]+)", all_text)
-    data["지목"] = jimok_match.group(1).strip() if jimok_match else "인식 실패"
-
-    # (3) 면적 추출 (숫자와 ㎡)
-    area_match = re.search(r"면\s*적\s*[:]?\s*([\d,.]+)", all_text)
-    data["면적(㎡)"] = area_match.group(1).strip() if area_match else "인식 실패"
-
-    # (4) 소유자 성명 추출 (단순 예시, 여러 명일 경우 복잡해짐)
-    owner_match = re.search(r"(성명|소유자명)\s*[:]?\s*([가-힣]{2,4})", all_text)
-    data["소유자"] = owner_match.group(2).strip() if owner_match else "인식 실패"
-
-    # (5) 변동일자/원인 등 추가 항목은 표 구조가 복잡하여
-    # Raw Data도 함께 제공하는 것이 좋습니다.
-    data["전체_추출_텍스트"] = all_text[:500] + "..."  # 너무 길면 자름
-
-    return pd.DataFrame([data])
-
-
-# --------------------------------------------------------------------------
-# 3. Streamlit UI 구성
-# --------------------------------------------------------------------------
-
-
+# ==========================================
+# 4. 웹 화면 구성 (Streamlit)
+# ==========================================
 def main():
-    st.set_page_config(page_title="토지대장 OCR 변환기", layout="wide")
+    st.set_page_config(page_title="토지 면적 계산기", page_icon="📐")
 
-    st.title("📄 토지대장 OCR to Excel 변환기")
-    st.markdown(
-        """
-    네이버 CLOVA OCR을 이용하여 토지대장 이미지(PDF, JPG, PNG)를 업로드하면 
-    주요 내용을 추출하여 엑셀 파일로 변환해줍니다.
-    """
-    )
+    st.title("📐 토지 등기 면적 자동 계산기")
+    st.write("토지 등기부등본(PDF/이미지)을 올리면 **면적**만 찾아냅니다.")
 
-    # 사이드바: API 키 설정 (Streamlit Cloud 배포 시 secrets에서 가져옴)
+    # 사이드바: API 키 설정
     with st.sidebar:
-        st.header("⚙️ 설정")
-        # Streamlit Secrets에서 가져오거나 직접 입력
-        try:
-            default_api_url = st.secrets["NAVER_API_URL"]
-            default_secret_key = st.secrets["NAVER_SECRET_KEY"]
-            api_url = default_api_url
-            secret_key = default_secret_key
-            st.success("API 키가 Secrets에서 로드되었습니다.")
-        except FileNotFoundError:
-            st.warning("로컬 테스트 중이거나 Secrets가 설정되지 않았습니다.")
+        st.header("설정")
+        auto_url, auto_key = get_api_keys()
+        
+        if auto_url:
+            st.success("API 키가 자동 로드되었습니다.")
+            api_url = auto_url
+            secret_key = auto_key
+        else:
+            st.warning("Secrets 설정이 없습니다. 직접 입력하세요.")
             api_url = st.text_input("API Gateway URL")
             secret_key = st.text_input("Secret Key", type="password")
 
     # 파일 업로드
-    uploaded_file = st.file_uploader(
-        "토지대장 파일을 업로드하세요", type=["png", "jpg", "jpeg", "pdf"]
-    )
+    uploaded_file = st.file_uploader("토지 등기 파일 업로드", type=['pdf', 'jpg', 'png'])
 
-    if uploaded_file is not None and api_url and secret_key:
+    if uploaded_file and st.button("면적 계산하기", type="primary"):
+        if not api_url or not secret_key:
+            st.error("API 키를 먼저 설정해주세요.")
+            return
 
-        # 파일 형식 확인
-        file_type = uploaded_file.name.split(".")[-1].lower()
-        if file_type == "pdf":
-            ocr_format = "pdf"
-        else:
-            ocr_format = file_type  # jpg, png 등
-
-        if st.button("🔍 변환 시작"):
-            with st.spinner("네이버 AI가 문서를 분석 중입니다..."):
-                # 파일 바이트 읽기
-                file_bytes = uploaded_file.getvalue()
-
-                # 1. API 호출
-                ocr_result = call_naver_ocr(file_bytes, ocr_format, api_url, secret_key)
-
-                if ocr_result:
-                    # 2. 결과 파싱
-                    df = parse_land_ledger(ocr_result)
-
-                    st.divider()
-                    st.subheader("✅ 변환 결과")
-
-                    # 데이터프레임 보여주기
-                    st.dataframe(df, use_container_width=True)
-
-                    # 3. 엑셀 다운로드 버튼
-                    output = BytesIO()
-                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                        df.to_excel(writer, index=False, sheet_name="토지대장_추출")
-
-                    st.download_button(
-                        label="📥 엑셀 파일 다운로드",
-                        data=output.getvalue(),
-                        file_name=f"토지대장_변환_{uploaded_file.name}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-
-                    # (디버깅용) JSON 원본 보기
-                    with st.expander("원본 OCR JSON 결과 보기"):
-                        st.json(ocr_result)
-
-    elif uploaded_file is not None:
-        st.warning("사이드바에서 API URL과 Secret Key를 확인해주세요.")
-
+        with st.spinner("네이버 AI가 문서를 읽고 있습니다..."):
+            # 1. OCR 실행
+            text_result = call_naver_ocr(uploaded_file, api_url, secret_key)
+            
+            if text_result:
+                # 2. 면적 추출
+                area_value = find_land_area(text_result)
+                
+                st.divider()
+                if area_value > 0:
+                    st.success("면적을 찾았습니다!")
+                    
+                    # 결과를 크고 잘 보이게 출력
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric(label="토지 면적 (㎡)", value=f"{area_value:,.2f} ㎡")
+                    with col2:
+                        # 평수 계산 (1㎡ = 0.3025평)
+                        pyeong = area_value * 0.3025
+                        st.metric(label="평수 환산 (평)", value=f"{pyeong:,.2f} 평")
+                else:
+                    st.warning("문서에서 '면적(㎡)' 패턴을 찾지 못했습니다.")
+                    st.caption("문서가 깨끗한지, 올바른 등기부인지 확인해주세요.")
+                
+                # 디버깅용 텍스트 보기
+                with st.expander("AI가 읽은 전체 텍스트 확인"):
+                    st.text(text_result)
+            else:
+                st.error("OCR 분석에 실패했습니다. (API 키 또는 파일 확인)")
 
 if __name__ == "__main__":
     main()
