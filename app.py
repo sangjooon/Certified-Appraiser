@@ -1,352 +1,177 @@
 import streamlit as st
-import pandas as pd
-import pdfplumber
 import requests
+import pandas as pd
 import uuid
 import time
 import json
 import re
 import io
-from dataclasses import dataclass
-from typing import List, Optional
+from io import BytesIO
 
-# ==========================================
-# 🛑 [보안 설정] API 키 로드 (secrets.toml)
-# ==========================================
-# 주의: 이 코드를 실행하려면 .streamlit/secrets.toml 파일이 필요합니다.
-# 만약 로컬에서 바로 테스트하려면 아래 변수에 직접 문자열을 넣으세요. (배포 시엔 지워야 함)
-try:
-    NAVER_API_URL = st.secrets["NAVER_API_URL"]
-    NAVER_SECRET_KEY = st.secrets["NAVER_SECRET_KEY"]
-except:
-    # secrets 파일이 없을 경우를 대비한 기본값 (경고 표시용)
-    NAVER_API_URL = ""
-    NAVER_SECRET_KEY = ""
+# --------------------------------------------------------------------------
+# 1. 설정 및 네이버 OCR 호출 함수
+# --------------------------------------------------------------------------
 
 
-# ==========================================
-# 1. 데이터 구조 정의
-# ==========================================
-@dataclass
-class DocInfo:
-    category: str
-    filename: str
-    address: str
-    area: float
-    owners: List[str]
-    raw_text: str
+def call_naver_ocr(file_bytes, file_format, api_url, secret_key):
+    """
+    네이버 CLOVA OCR API를 호출하는 함수
+    """
+    request_json = {
+        "images": [{"format": file_format, "name": "demo"}],
+        "requestId": str(uuid.uuid4()),
+        "version": "V2",
+        "timestamp": int(round(time.time() * 1000)),
+    }
+
+    payload = {"message": json.dumps(request_json).encode("UTF-8")}
+    files = [("file", file_bytes)]
+    headers = {"X-OCR-SECRET": secret_key}
+
+    try:
+        response = requests.post(api_url, headers=headers, data=payload, files=files)
+        response.raise_for_status()  # 에러 발생 시 예외 처리
+        return response.json()
+    except Exception as e:
+        st.error(f"OCR API 호출 중 오류 발생: {str(e)}")
+        return None
 
 
-@dataclass
-class CompareResult:
-    target: str
-    item: str
-    is_match: bool
-    doc1_val: str
-    doc2_val: str
-    msg: str
+# --------------------------------------------------------------------------
+# 2. 토지대장 파싱 로직 (핵심)
+# --------------------------------------------------------------------------
 
 
-# ==========================================
-# 2. 파싱 엔진 (네이버 OCR + 웹 파일 처리)
-# ==========================================
-class MasterParser:
-    @staticmethod
-    def call_naver_ocr(uploaded_file):
-        """웹에서 업로드된 파일 객체를 네이버 OCR로 전송"""
-        if not NAVER_API_URL or not NAVER_SECRET_KEY:
-            return ""
+def parse_land_ledger(ocr_result):
+    """
+    OCR 결과(JSON)에서 토지대장의 주요 항목을 추출하여 DataFrame으로 변환
+    *참고: 실제 토지대장 양식에 따라 정규표현식(Regex)을 정교하게 다듬어야 합니다.*
+    """
+    if not ocr_result or "images" not in ocr_result:
+        return pd.DataFrame()
 
-        # 파일 포맷 확인
-        file_ext = uploaded_file.name.split(".")[-1].lower()
-        format_type = file_ext if file_ext in ["jpg", "jpeg", "png", "pdf"] else "pdf"
+    # 1. 전체 텍스트를 하나의 문자열로 결합 (위치 기반으로 정렬된 상태 가정)
+    all_text = ""
+    fields = ocr_result["images"][0]["fields"]
 
-        # 요청 데이터 생성
-        request_json = {
-            "images": [{"format": format_type, "name": "demo"}],
-            "requestId": str(uuid.uuid4()),
-            "version": "V2",
-            "timestamp": int(round(time.time() * 1000)),
-        }
+    # y좌표 순서대로 정렬 (줄 단위 인식) -> x좌표 순서대로 정렬
+    # 네이버 OCR은 기본적으로 읽는 순서를 어느정도 맞춰주지만, 확실하게 하기 위함
+    # fields.sort(key=lambda x: (x['boundingPoly']['vertices'][0]['y'], x['boundingPoly']['vertices'][0]['x']))
 
-        payload = {"message": json.dumps(request_json).encode("UTF-8")}
-        headers = {"X-OCR-SECRET": NAVER_SECRET_KEY}
+    for field in fields:
+        all_text += field["inferText"] + " "
 
-        try:
-            # Streamlit UploadedFile은 'getvalue()'로 바이너리 데이터를 읽습니다.
-            files = [
-                (
-                    "file",
-                    (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type),
-                )
-            ]
+    # 2. 정규표현식을 이용한 데이터 추출 (예시)
+    data = {}
 
-            response = requests.post(
-                NAVER_API_URL, headers=headers, data=payload, files=files
-            )
+    # (1) 소재지 추출 (예: 경기도 성남시...)
+    # '소재지' 또는 '토지 소재' 뒤에 나오는 주소 패턴 찾기
+    address_match = re.search(
+        r"(소재지|토지\s*소재)\s*[:]?\s*([가-힣]+[시도].*?)(?=\s지\s*번|\s지\s*목|$)",
+        all_text,
+    )
+    data["소재지"] = address_match.group(2).strip() if address_match else "인식 실패"
 
-            if response.status_code == 200:
-                result = response.json()
-                full_text = ""
-                for image in result.get("images", []):
-                    for field in image.get("fields", []):
-                        full_text += field.get("inferText", "") + " "
-                return full_text
-            else:
-                return ""  # OCR 실패
-        except Exception:
-            return ""  # 통신 에러
+    # (2) 지목 추출 (예: 대, 전, 답, 임야)
+    jimok_match = re.search(r"지\s*목\s*[:]?\s*([가-힣]+)", all_text)
+    data["지목"] = jimok_match.group(1).strip() if jimok_match else "인식 실패"
 
-    @staticmethod
-    def parse(uploaded_file) -> DocInfo:
-        filename = uploaded_file.name
-        full_text = ""
+    # (3) 면적 추출 (숫자와 ㎡)
+    area_match = re.search(r"면\s*적\s*[:]?\s*([\d,.]+)", all_text)
+    data["면적(㎡)"] = area_match.group(1).strip() if area_match else "인식 실패"
 
-        # 1. 네이버 OCR 시도
-        full_text = MasterParser.call_naver_ocr(uploaded_file)
+    # (4) 소유자 성명 추출 (단순 예시, 여러 명일 경우 복잡해짐)
+    owner_match = re.search(r"(성명|소유자명)\s*[:]?\s*([가-힣]{2,4})", all_text)
+    data["소유자"] = owner_match.group(2).strip() if owner_match else "인식 실패"
 
-        # 2. 실패 시(또는 키 설정 안 됨) 무료 엔진(pdfplumber) 백업 실행
-        if not full_text:
-            try:
-                with pdfplumber.open(uploaded_file) as pdf:
-                    for page in pdf.pages:
-                        full_text += str(page.extract_text()) + "\n"
-            except:
-                pass  # 이미지 파일이면 pdfplumber 실패할 수 있음
+    # (5) 변동일자/원인 등 추가 항목은 표 구조가 복잡하여
+    # Raw Data도 함께 제공하는 것이 좋습니다.
+    data["전체_추출_텍스트"] = all_text[:500] + "..."  # 너무 길면 자름
 
-        # 3. 문서 종류 식별
-        cat = "미식별"
-        if "건축물대장" in full_text or "건물ID" in full_text:
-            cat = "건축물대장"
-        elif "토지대장" in full_text or "임야대장" in full_text:
-            cat = "토지대장"
-        elif "등기사항전부증명서" in full_text:
-            if "건물의표시" in full_text.replace(" ", "") or "[집합건물]" in full_text:
-                cat = "건물등기"
-            elif "토지의표시" in full_text.replace(" ", ""):
-                cat = "토지등기"
-            else:
-                cat = "건물등기"
-        else:
-            cat = "기타문서"
-
-        # 4. 데이터 추출
-        address = "인식실패"
-        area = 0.0
-        owners = []
-
-        # (1) 주소
-        addr_match = re.search(
-            r"(소재지|대지위치)\s*[:]?\s*([가-힣]+[시도].*?)\s", full_text
-        )
-        if addr_match:
-            address = addr_match.group(2).strip()
-        else:
-            addr_match2 = re.search(
-                r"([가-힣]+[시도]\s+[가-힣]+[구시군]\s+[가-힣]+[읍면동].*?)\s",
-                full_text,
-            )
-            if addr_match2:
-                address = addr_match2.group(1).strip()
-
-        # (2) 면적
-        area_matches = re.findall(r"(\d+(?:,\d+)*(?:\.\d+)?)\s*㎡", full_text)
-        valid_areas = [
-            float(m.replace(",", ""))
-            for m in area_matches
-            if float(m.replace(",", "")) > 1.0
-        ]
-        if valid_areas:
-            area = max(valid_areas)
-
-        # (3) 소유자
-        if "등기" in cat:
-            owners = list(
-                set(re.findall(r"소유자\s+([가-힣]{2,4}|주식회사\S+)", full_text))
-            )
-        elif "건축물" in cat:
-            owners = list(set(re.findall(r"성명\s*([가-힣]{3})", full_text)))
-        elif "토지" in cat:
-            owners = list(set(re.findall(r"([가-힣]{3})\s+\(\d{6}-\d{7}\)", full_text)))
-            if not owners:
-                owners = list(set(re.findall(r"성명\s*([가-힣]{3})", full_text)))
-
-        if not owners:
-            owners = ["(미상)"]
-
-        return DocInfo(cat, filename, address, area, owners, full_text)
+    return pd.DataFrame([data])
 
 
-# ==========================================
-# 3. 비교 분석기 (로직 동일)
-# ==========================================
-class CrossAnalyzer:
-    def __init__(self, ll, lr, bl, br):
-        self.ll = ll
-        self.lr = lr
-        self.bl = bl
-        self.br = br
-
-    def compare_pair(
-        self, doc1: DocInfo, doc2: DocInfo, target_name: str
-    ) -> List[CompareResult]:
-        res = []
-        if not doc1 or not doc2:
-            return [
-                CompareResult(target_name, "문서없음", False, "-", "-", "파일 누락")
-            ]
-
-        a1 = doc1.address.replace("경기도", "").replace(" ", "")
-        a2 = doc2.address.replace("경기도", "").replace(" ", "")
-        match_addr = (a1 in a2) or (a2 in a1)
-        res.append(
-            CompareResult(
-                target_name,
-                "소재지",
-                match_addr,
-                doc1.address,
-                doc2.address,
-                "일치" if match_addr else "확인필요",
-            )
-        )
-
-        diff = abs(doc1.area - doc2.area)
-        match_area = diff < 3.3
-        res.append(
-            CompareResult(
-                target_name,
-                "면적(㎡)",
-                match_area,
-                str(doc1.area),
-                str(doc2.area),
-                "일치" if match_area else f"오차 {diff:.1f}",
-            )
-        )
-
-        s1 = set(doc1.owners)
-        s2 = set(doc2.owners)
-        match_owner = not s1.isdisjoint(s2)
-        res.append(
-            CompareResult(
-                target_name,
-                "소유자",
-                match_owner,
-                str(list(s1)),
-                str(list(s2)),
-                "일치" if match_owner else "불일치",
-            )
-        )
-        return res
-
-    def run(self):
-        return self.compare_pair(self.ll, self.lr, "[토지]") + self.compare_pair(
-            self.bl, self.br, "[건물]"
-        )
+# --------------------------------------------------------------------------
+# 3. Streamlit UI 구성
+# --------------------------------------------------------------------------
 
 
-# ==========================================
-# 4. Streamlit 웹 UI
-# ==========================================
 def main():
-    st.set_page_config(page_title="부동산 AI 분석기", layout="wide", page_icon="🏘️")
+    st.set_page_config(page_title="토지대장 OCR 변환기", layout="wide")
 
-    st.title("🏘️ 부동산 4대 서류 AI 통합 분석기")
+    st.title("📄 토지대장 OCR to Excel 변환기")
     st.markdown(
         """
-    **토지/건축물 대장**과 **등기부등본**을 업로드하면, **네이버 AI**가 서류를 읽고 교차 검증합니다.
+    네이버 CLOVA OCR을 이용하여 토지대장 이미지(PDF, JPG, PNG)를 업로드하면 
+    주요 내용을 추출하여 엑셀 파일로 변환해줍니다.
     """
     )
 
-    # API 키 상태 확인
-    if not NAVER_API_URL or not NAVER_SECRET_KEY:
-        st.warning(
-            "⚠️ 네이버 OCR API 키가 설정되지 않았습니다. 결과가 정확하지 않을 수 있습니다."
-        )
+    # 사이드바: API 키 설정 (Streamlit Cloud 배포 시 secrets에서 가져옴)
+    with st.sidebar:
+        st.header("⚙️ 설정")
+        # Streamlit Secrets에서 가져오거나 직접 입력
+        try:
+            default_api_url = st.secrets["NAVER_API_URL"]
+            default_secret_key = st.secrets["NAVER_SECRET_KEY"]
+            api_url = default_api_url
+            secret_key = default_secret_key
+            st.success("API 키가 Secrets에서 로드되었습니다.")
+        except FileNotFoundError:
+            st.warning("로컬 테스트 중이거나 Secrets가 설정되지 않았습니다.")
+            api_url = st.text_input("API Gateway URL")
+            secret_key = st.text_input("Secret Key", type="password")
 
-    st.divider()
+    # 파일 업로드
+    uploaded_file = st.file_uploader(
+        "토지대장 파일을 업로드하세요", type=["png", "jpg", "jpeg", "pdf"]
+    )
 
-    col1, col2 = st.columns(2)
+    if uploaded_file is not None and api_url and secret_key:
 
-    with col1:
-        st.header("1. 토지 (Land)")
-        f_ll = st.file_uploader(
-            "📂 토지대장 업로드", type=["pdf", "jpg", "png"], key="ll"
-        )
-        f_lr = st.file_uploader(
-            "📂 토지등기 업로드", type=["pdf", "jpg", "png"], key="lr"
-        )
+        # 파일 형식 확인
+        file_type = uploaded_file.name.split(".")[-1].lower()
+        if file_type == "pdf":
+            ocr_format = "pdf"
+        else:
+            ocr_format = file_type  # jpg, png 등
 
-    with col2:
-        st.header("2. 건물 (Building)")
-        f_bl = st.file_uploader(
-            "📂 건축물대장 업로드", type=["pdf", "jpg", "png"], key="bl"
-        )
-        f_br = st.file_uploader(
-            "📂 건물등기 업로드", type=["pdf", "jpg", "png"], key="br"
-        )
+        if st.button("🔍 변환 시작"):
+            with st.spinner("네이버 AI가 문서를 분석 중입니다..."):
+                # 파일 바이트 읽기
+                file_bytes = uploaded_file.getvalue()
 
-    st.divider()
+                # 1. API 호출
+                ocr_result = call_naver_ocr(file_bytes, ocr_format, api_url, secret_key)
 
-    if st.button("🚀 AI 정밀 분석 실행", type="primary", use_container_width=True):
-        if not (f_ll or f_lr or f_bl or f_br):
-            st.error("최소한 하나의 파일은 업로드해야 합니다!")
-            return
+                if ocr_result:
+                    # 2. 결과 파싱
+                    df = parse_land_ledger(ocr_result)
 
-        with st.spinner("AI가 서류를 읽고 분석 중입니다... (약 10초 소요)"):
-            # 파싱 (파일 객체를 그대로 넘김)
-            d_ll = MasterParser.parse(f_ll) if f_ll else None
-            d_lr = MasterParser.parse(f_lr) if f_lr else None
-            d_bl = MasterParser.parse(f_bl) if f_bl else None
-            d_br = MasterParser.parse(f_br) if f_br else None
+                    st.divider()
+                    st.subheader("✅ 변환 결과")
 
-            # 비교 분석
-            analyzer = CrossAnalyzer(d_ll, d_lr, d_bl, d_br)
-            results = analyzer.run()
+                    # 데이터프레임 보여주기
+                    st.dataframe(df, use_container_width=True)
 
-            # 데이터프레임 변환
-            data_rows = []
-            for r in results:
-                data_rows.append(
-                    {
-                        "대상": r.target,
-                        "검증 항목": r.item,
-                        "판정": "✅ 통과" if r.is_match else "⚠️ 확인 필요",
-                        "대장 내용 (Fact)": r.doc1_val,
-                        "등기 내용 (Right)": r.doc2_val,
-                        "비고": r.msg,
-                    }
-                )
+                    # 3. 엑셀 다운로드 버튼
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                        df.to_excel(writer, index=False, sheet_name="토지대장_추출")
 
-            df = pd.DataFrame(data_rows)
+                    st.download_button(
+                        label="📥 엑셀 파일 다운로드",
+                        data=output.getvalue(),
+                        file_name=f"토지대장_변환_{uploaded_file.name}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
 
-            # 결과 화면 출력
-            st.success("분석이 완료되었습니다!")
-            st.dataframe(df, use_container_width=True)
+                    # (디버깅용) JSON 원본 보기
+                    with st.expander("원본 OCR JSON 결과 보기"):
+                        st.json(ocr_result)
 
-            # 엑셀 다운로드 버튼
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False)
-
-            st.download_button(
-                label="📥 분석 결과 엑셀 다운로드",
-                data=output.getvalue(),
-                file_name="부동산_AI_분석결과.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-
-            # (옵션) 디버깅용 추출 텍스트 보기
-            with st.expander("🔍 AI가 읽은 원본 텍스트 보기"):
-                c1, c2 = st.columns(2)
-                if d_ll:
-                    c1.text_area("토지대장 내용", d_ll.raw_text[:500], height=150)
-                if d_lr:
-                    c1.text_area("토지등기 내용", d_lr.raw_text[:500], height=150)
-                if d_bl:
-                    c2.text_area("건축물대장 내용", d_bl.raw_text[:500], height=150)
-                if d_br:
-                    c2.text_area("건물등기 내용", d_br.raw_text[:500], height=150)
+    elif uploaded_file is not None:
+        st.warning("사이드바에서 API URL과 Secret Key를 확인해주세요.")
 
 
 if __name__ == "__main__":
