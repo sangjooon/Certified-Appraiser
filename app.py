@@ -1,24 +1,28 @@
 import streamlit as st
 import requests
+import pandas as pd
 import uuid
 import time
 import json
+import re
 import io
 
+
 # ==========================================
-# 1. 네이버 OCR 호출 함수 (기본)
+# 1. [설정] 네이버 API 연결
 # ==========================================
 def call_naver_ocr(file_bytes, file_ext, api_url, secret_key):
+    """네이버 OCR을 호출해서 JSON 결과를 받아옵니다."""
     request_json = {
-        'images': [{'format': file_ext, 'name': 'demo'}],
-        'requestId': str(uuid.uuid4()),
-        'version': 'V2',
-        'timestamp': int(round(time.time() * 1000))
+        "images": [{"format": file_ext, "name": "demo"}],
+        "requestId": str(uuid.uuid4()),
+        "version": "V2",
+        "timestamp": int(round(time.time() * 1000)),
     }
-    
-    payload = {'message': json.dumps(request_json).encode('UTF-8')}
-    headers = {'X-OCR-SECRET': secret_key}
-    files = [('file', file_bytes)]
+
+    payload = {"message": json.dumps(request_json).encode("UTF-8")}
+    headers = {"X-OCR-SECRET": secret_key}
+    files = [("file", file_bytes)]
 
     try:
         response = requests.post(api_url, headers=headers, data=payload, files=files)
@@ -28,67 +32,113 @@ def call_naver_ocr(file_bytes, file_ext, api_url, secret_key):
     except:
         return None
 
+
 # ==========================================
-# 2. 핵심 로직: 줄글로 변환하기 📝
+# 2. [전처리] JSON -> 줄글 텍스트 변환
 # ==========================================
-def ocr_to_plain_text(ocr_json):
-    if not ocr_json or 'images' not in ocr_json:
+def json_to_text_lines(ocr_json):
+    """
+    OCR 결과를 받아서 사람이 읽는 순서(위->아래, 좌->우)대로
+    깔끔한 텍스트 덩어리로 만듭니다.
+    """
+    if not ocr_json or "images" not in ocr_json:
         return ""
 
-    fields = ocr_json['images'][0]['fields']
-    
-    # 1. 데이터 추출 (글자 + Y좌표)
-    # 네이버는 보통 읽는 순서대로 주지만, 확실하게 하기 위해 좌표도 같이 봅니다.
+    fields = ocr_json["images"][0]["fields"]
+
+    # y좌표(줄), x좌표(칸) 정보와 함께 저장
     extracted_data = []
     for field in fields:
-        text = field['inferText']
-        # 상단 Y좌표 (글자의 높이 위치)
-        y = field['boundingPoly']['vertices'][0]['y']
-        # 좌측 X좌표 (같은 줄에서 순서 정렬용)
-        x = field['boundingPoly']['vertices'][0]['x']
-        extracted_data.append({'text': text, 'x': x, 'y': y})
+        text = field["inferText"]
+        x = field["boundingPoly"]["vertices"][0]["x"]
+        y = field["boundingPoly"]["vertices"][0]["y"]
+        extracted_data.append({"text": text, "x": x, "y": y})
 
-    # 2. Y좌표(세로 위치) 기준으로 정렬 -> 위에서 아래로 읽기 위함
-    extracted_data.sort(key=lambda k: k['y'])
+    # Y좌표(높이) 순으로 정렬
+    extracted_data.sort(key=lambda k: k["y"])
 
-    # 3. 같은 줄끼리 묶어서 텍스트 생성
     full_text = ""
     if extracted_data:
         current_line = []
-        last_y = extracted_data[0]['y']
-        
+        last_y = extracted_data[0]["y"]
+
         for item in extracted_data:
-            # 줄 바꿈 판단 기준: 높이 차이가 15픽셀 이상 나면 "다음 줄"로 간주
-            if abs(item['y'] - last_y) > 15:
-                # 지금까지 모은 줄을 X좌표(왼쪽->오른쪽) 순으로 정렬
-                current_line.sort(key=lambda k: k['x'])
-                
-                # 한 줄로 합치기 (단어 사이 띄어쓰기)
-                line_str = " ".join([d['text'] for d in current_line])
-                full_text += line_str + "\n"  # 엔터 추가
-                
-                # 초기화
+            # 줄 바꿈 감지 (높이 차이 15px 이상)
+            if abs(item["y"] - last_y) > 15:
+                # 같은 줄 내에서는 왼쪽 -> 오른쪽 정렬
+                current_line.sort(key=lambda k: k["x"])
+                full_text += " ".join([d["text"] for d in current_line]) + "\n"
                 current_line = []
-            
+
             current_line.append(item)
-            last_y = item['y'] # 기준 높이 업데이트
-        
-        # 마지막 남은 줄 처리
+            last_y = item["y"]
+
+        # 마지막 줄 처리
         if current_line:
-            current_line.sort(key=lambda k: k['x'])
-            full_text += " ".join([d['text'] for d in current_line])
+            current_line.sort(key=lambda k: k["x"])
+            full_text += " ".join([d["text"] for d in current_line])
 
     return full_text
 
+
 # ==========================================
-# 3. Streamlit UI
+# 3. [핵심] 절대 규칙(Rule)으로 데이터 뽑기 ⚡
+# ==========================================
+def extract_data_by_rules(text):
+    """
+    텍스트 덩어리에서 정규표현식(Regex)을 이용해 핵심 데이터를 추출합니다.
+    *여기에 파트너님이 원하는 규칙을 추가하면 됩니다.*
+    """
+    data = {}
+
+    # --- 규칙 1: 소재지 (주소) ---
+    # "소재지" 라는 글자 뒤에 나오는 "경기도 ~~~" 패턴을 찾음
+    # (?m)은 멀티라인 모드, ^는 줄 시작
+    addr_match = re.search(
+        r"(소재지|대지위치)\s*[:]?\s*([가-힣]+[시도].*?)(?=\s지\s*번|\s면\s*적|\s지\s*목|$)",
+        text,
+    )
+    data["소재지"] = addr_match.group(2).strip() if addr_match else "찾지 못함"
+
+    # --- 규칙 2: 지목 (땅의 용도) ---
+    # "지목" 뒤에 나오는 한글 단어 (예: 대, 전, 답, 임야)
+    jimok_match = re.search(r"지\s*목\s*[:]?\s*([가-힣]+)", text)
+    data["지목"] = jimok_match.group(1).strip() if jimok_match else "찾지 못함"
+
+    # --- 규칙 3: 면적 (숫자 + ㎡) ---
+    # 콤마(,)와 소수점(.)을 포함한 숫자 뒤에 "㎡"가 있는 것
+    area_matches = re.findall(r"(\d+(?:,\d+)*(?:\.\d+)?)\s*㎡", text)
+    # 팁: 문서에 면적이 여러 개 나오면 보통 제일 큰 게 전체 면적임
+    if area_matches:
+        valid_areas = [float(a.replace(",", "")) for a in area_matches]
+        data["면적(㎡)"] = max(valid_areas)  # 가장 큰 값 선택
+    else:
+        data["면적(㎡)"] = "찾지 못함"
+
+    # --- 규칙 4: 소유자 (이름) ---
+    # "성명" 또는 "소유자" 뒤에 오는 이름 (보통 3글자)
+    owner_match = re.search(r"(성명|소유자)\s*[:]?\s*([가-힣]{3})", text)
+    data["소유자"] = owner_match.group(2).strip() if owner_match else "찾지 못함"
+
+    # --- 규칙 5: (옵션) 원본 텍스트 일부 저장 ---
+    data["원본_요약"] = text[:100].replace("\n", " ") + "..."
+
+    return data
+
+
+# ==========================================
+# 4. Streamlit UI
 # ==========================================
 def main():
-    st.set_page_config(page_title="텍스트 변환기", layout="centered")
-    st.title("📝 문서 -> 줄글(Text) 변환기")
-    st.markdown("PDF나 이미지를 올리면 **읽기 편한 텍스트**로 쭉 뽑아줍니다.")
+    st.set_page_config(page_title="규칙 기반 변환기", layout="wide")
+    st.title("🎯 규칙(Rule) 기반 정밀 변환기")
+    st.markdown(
+        """
+    문서를 텍스트로 먼저 변환한 뒤, **정해진 규칙(소재지, 면적 등)**에 맞는 데이터만 쏙쏙 뽑아냅니다.
+    """
+    )
 
-    # 사이드바 설정
+    # 사이드바 API 설정
     with st.sidebar:
         try:
             api_url = st.secrets["NAVER_API_URL"]
@@ -97,39 +147,63 @@ def main():
             api_url = st.text_input("API URL")
             secret_key = st.text_input("Secret Key", type="password")
 
-    uploaded_file = st.file_uploader("파일 업로드 (PDF/JPG)", type=['pdf', 'jpg', 'png'])
+    uploaded_file = st.file_uploader(
+        "문서 업로드 (PDF/이미지)", type=["pdf", "jpg", "png"]
+    )
 
-    if uploaded_file and st.button("텍스트 추출하기"):
+    if uploaded_file and st.button("🔍 데이터 추출 시작"):
         if not api_url:
-            st.error("API 키가 없습니다.")
+            st.error("API 키 확인 필요")
             return
 
-        with st.spinner("텍스트를 읽어오는 중..."):
+        with st.spinner("1단계: 문서를 텍스트로 변환 중..."):
             file_bytes = uploaded_file.getvalue()
-            ext = uploaded_file.name.split('.')[-1].lower()
-            fmt = ext if ext in ['jpg', 'png'] else 'pdf'
-            
-            # OCR 호출
-            result = call_naver_ocr(file_bytes, fmt, api_url, secret_key)
-            
-            if result:
-                # 줄글 변환
-                plain_text = ocr_to_plain_text(result)
-                
-                st.success("추출 완료!")
-                
-                # 1. 화면에 보여주기 (복사하기 좋게)
-                st.text_area("추출된 내용", plain_text, height=400)
-                
-                # 2. txt 파일 다운로드
-                st.download_button(
-                    label="📥 텍스트 파일(.txt) 다운로드",
-                    data=plain_text,
-                    file_name=f"{uploaded_file.name}_변환.txt",
-                    mime="text/plain"
-                )
+            ext = uploaded_file.name.split(".")[-1].lower()
+            fmt = ext if ext in ["jpg", "png"] else "pdf"
+
+            # 1. OCR -> JSON
+            ocr_json = call_naver_ocr(file_bytes, fmt, api_url, secret_key)
+
+            if ocr_json:
+                # 2. JSON -> 줄글 텍스트 (Raw Text)
+                raw_text = json_to_text_lines(ocr_json)
+
+                with st.spinner("2단계: 규칙에 맞춰 데이터 뽑는 중..."):
+                    # 3. 텍스트 -> 엑셀 데이터 (규칙 적용)
+                    extracted_data = extract_data_by_rules(raw_text)
+
+                    # 결과 보여주기
+                    st.divider()
+                    col1, col2 = st.columns([1, 1])
+
+                    with col1:
+                        st.subheader("✅ 추출 결과 (Excel)")
+                        df = pd.DataFrame(
+                            [extracted_data]
+                        )  # 리스트로 감싸서 행으로 만듦
+                        st.dataframe(
+                            df.T, use_container_width=True
+                        )  # 보기 좋게 행/열 바꿔서 표시
+
+                        # 엑셀 다운로드
+                        output = io.BytesIO()
+                        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                            df.to_excel(writer, index=False)
+
+                        st.download_button(
+                            label="📥 엑셀 파일 다운로드",
+                            data=output.getvalue(),
+                            file_name=f"규칙추출_{uploaded_file.name}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+
+                    with col2:
+                        st.subheader("📄 AI가 읽은 원본 텍스트")
+                        st.text_area("OCR Raw Text", raw_text, height=400)
+
             else:
-                st.error("OCR 분석 실패")
+                st.error("OCR 분석에 실패했습니다.")
+
 
 if __name__ == "__main__":
     main()
