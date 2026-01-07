@@ -1,13 +1,12 @@
 import streamlit as st
 import requests
-import pandas as pd
 import uuid
 import time
 import json
 import io
 
 # ==========================================
-# 1. 네이버 OCR 호출 함수
+# 1. 네이버 OCR 호출 함수 (기본)
 # ==========================================
 def call_naver_ocr(file_bytes, file_ext, api_url, secret_key):
     request_json = {
@@ -25,123 +24,112 @@ def call_naver_ocr(file_bytes, file_ext, api_url, secret_key):
         response = requests.post(api_url, headers=headers, data=payload, files=files)
         if response.status_code == 200:
             return response.json()
-        else:
-            st.error(f"OCR 통신 에러: {response.text}")
-            return None
-    except Exception as e:
-        st.error(f"연결 실패: {str(e)}")
+        return None
+    except:
         return None
 
 # ==========================================
-# 2. 핵심: 좌표 기반 엑셀 변환 로직 🧠
+# 2. 핵심 로직: 줄글로 변환하기 📝
 # ==========================================
-def json_to_excel_layout(ocr_json):
+def ocr_to_plain_text(ocr_json):
     if not ocr_json or 'images' not in ocr_json:
-        return pd.DataFrame(), pd.DataFrame()
+        return ""
 
     fields = ocr_json['images'][0]['fields']
     
-    # 1. 모든 글자에 Y좌표(높이) 정보를 추가해서 리스트로 만듦
-    # boundingPoly.vertices[0].y 가 글자의 상단 Y좌표
+    # 1. 데이터 추출 (글자 + Y좌표)
+    # 네이버는 보통 읽는 순서대로 주지만, 확실하게 하기 위해 좌표도 같이 봅니다.
     extracted_data = []
     for field in fields:
         text = field['inferText']
-        x = field['boundingPoly']['vertices'][0]['x']
+        # 상단 Y좌표 (글자의 높이 위치)
         y = field['boundingPoly']['vertices'][0]['y']
+        # 좌측 X좌표 (같은 줄에서 순서 정렬용)
+        x = field['boundingPoly']['vertices'][0]['x']
         extracted_data.append({'text': text, 'x': x, 'y': y})
 
-    # 2. Y좌표(세로 위치) 기준으로 정렬
+    # 2. Y좌표(세로 위치) 기준으로 정렬 -> 위에서 아래로 읽기 위함
     extracted_data.sort(key=lambda k: k['y'])
 
-    # 3. 같은 줄(Row)끼리 그룹화 (Y좌표 차이가 15픽셀 이내면 같은 줄로 간주)
-    rows = []
-    current_row = []
+    # 3. 같은 줄끼리 묶어서 텍스트 생성
+    full_text = ""
     if extracted_data:
+        current_line = []
         last_y = extracted_data[0]['y']
         
         for item in extracted_data:
-            # 이전 글자와 높이 차이가 15px 보다 크면 -> 줄 바꿈
+            # 줄 바꿈 판단 기준: 높이 차이가 15픽셀 이상 나면 "다음 줄"로 간주
             if abs(item['y'] - last_y) > 15:
-                # 지금까지 모은 줄을 X좌표 순으로 정렬하고 저장
-                current_row.sort(key=lambda k: k['x'])
-                rows.append([d['text'] for d in current_row])
-                current_row = [] # 새 줄 시작
+                # 지금까지 모은 줄을 X좌표(왼쪽->오른쪽) 순으로 정렬
+                current_line.sort(key=lambda k: k['x'])
+                
+                # 한 줄로 합치기 (단어 사이 띄어쓰기)
+                line_str = " ".join([d['text'] for d in current_line])
+                full_text += line_str + "\n"  # 엔터 추가
+                
+                # 초기화
+                current_line = []
             
-            current_row.append(item)
-            last_y = item['y']
+            current_line.append(item)
+            last_y = item['y'] # 기준 높이 업데이트
         
-        # 마지막 줄 처리
-        if current_row:
-            current_row.sort(key=lambda k: k['x'])
-            rows.append([d['text'] for d in current_row])
+        # 마지막 남은 줄 처리
+        if current_line:
+            current_line.sort(key=lambda k: k['x'])
+            full_text += " ".join([d['text'] for d in current_line])
 
-    # 4. 시각적 엑셀 데이터프레임 생성
-    df_visual = pd.DataFrame(rows)
-    
-    # 5. (옵션) 원본 좌표 데이터프레임 (Raw Data)
-    df_raw = pd.DataFrame(extracted_data)
-
-    return df_visual, df_raw
+    return full_text
 
 # ==========================================
 # 3. Streamlit UI
 # ==========================================
 def main():
-    st.set_page_config(page_title="OCR 전체 변환기", layout="wide")
-    st.title("📑 만능 문서 → 엑셀 변환기")
-    st.markdown("OCR이 읽은 **모든 글자**를 빠짐없이 엑셀 좌표처럼 변환합니다.")
+    st.set_page_config(page_title="텍스트 변환기", layout="centered")
+    st.title("📝 문서 -> 줄글(Text) 변환기")
+    st.markdown("PDF나 이미지를 올리면 **읽기 편한 텍스트**로 쭉 뽑아줍니다.")
 
     # 사이드바 설정
     with st.sidebar:
-        st.header("설정")
         try:
             api_url = st.secrets["NAVER_API_URL"]
             secret_key = st.secrets["NAVER_SECRET_KEY"]
-            st.success("API 키 자동 로드됨")
         except:
             api_url = st.text_input("API URL")
             secret_key = st.text_input("Secret Key", type="password")
 
-    uploaded_file = st.file_uploader("PDF나 이미지 파일을 올려주세요", type=['pdf', 'jpg', 'png'])
+    uploaded_file = st.file_uploader("파일 업로드 (PDF/JPG)", type=['pdf', 'jpg', 'png'])
 
-    if uploaded_file and st.button("전체 변환 실행"):
+    if uploaded_file and st.button("텍스트 추출하기"):
         if not api_url:
-            st.error("API 키를 입력해주세요.")
+            st.error("API 키가 없습니다.")
             return
 
-        with st.spinner("AI가 문서를 스캔하고 엑셀로 다시 그리는 중..."):
+        with st.spinner("텍스트를 읽어오는 중..."):
             file_bytes = uploaded_file.getvalue()
             ext = uploaded_file.name.split('.')[-1].lower()
-            ocr_fmt = ext if ext in ['jpg', 'png'] else 'pdf'
+            fmt = ext if ext in ['jpg', 'png'] else 'pdf'
             
-            # 1. OCR 호출
-            result_json = call_naver_ocr(file_bytes, ocr_fmt, api_url, secret_key)
+            # OCR 호출
+            result = call_naver_ocr(file_bytes, fmt, api_url, secret_key)
             
-            if result_json:
-                # 2. 엑셀 레이아웃 변환
-                df_view, df_raw = json_to_excel_layout(result_json)
+            if result:
+                # 줄글 변환
+                plain_text = ocr_to_plain_text(result)
                 
-                st.success("변환 완료!")
+                st.success("추출 완료!")
                 
-                # 화면에 미리보기
-                st.subheader("👀 엑셀 미리보기 (상위 10줄)")
-                st.dataframe(df_view.head(10), use_container_width=True)
-
-                # 3. 엑셀 다운로드 (Sheet 2개로 분리)
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_view.to_excel(writer, index=False, header=False, sheet_name='문서_레이아웃')
-                    df_raw.to_excel(writer, index=False, sheet_name='좌표_원본데이터')
+                # 1. 화면에 보여주기 (복사하기 좋게)
+                st.text_area("추출된 내용", plain_text, height=400)
                 
+                # 2. txt 파일 다운로드
                 st.download_button(
-                    label="📥 전체 엑셀 다운로드",
-                    data=output.getvalue(),
-                    file_name=f"OCR_Full_Convert_{uploaded_file.name}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    label="📥 텍스트 파일(.txt) 다운로드",
+                    data=plain_text,
+                    file_name=f"{uploaded_file.name}_변환.txt",
+                    mime="text/plain"
                 )
-                
-                with st.expander("개발자용: JSON 원본 데이터 확인"):
-                    st.json(result_json)
+            else:
+                st.error("OCR 분석 실패")
 
 if __name__ == "__main__":
     main()
