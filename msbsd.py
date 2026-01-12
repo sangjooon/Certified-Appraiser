@@ -14,7 +14,7 @@ def main():
     #페이지 상단 및 설정
     st.set_page_config(
         page_title="문서 비서",
-        page_icon="📄"
+        page_icon="📄",
         layout="wide"
     )
     
