@@ -8,7 +8,6 @@ import pandas as pd
 
 
 
-
 #main 함수
 def main():
     st.set_page_config(
@@ -18,6 +17,9 @@ def main():
 
 
 
+
 #실행
 if __name__ == "__main__":
-    main
+    main()
+
+
