@@ -19,7 +19,11 @@ def main():
     )
     
     #제목
-    st.title("문서 비서📄")
+    st.title("문서 비서📄 dev")
+    
+    #개발 단계
+    st.header("토지의 소재지를 출력합니다.")
+    
     #서비스 설명
     st.markdown(
         """
@@ -29,10 +33,18 @@ def main():
     )
     
     #비밀번호(임시)
-    password = st.text_input("비밀번호를 입력하세요:", type="password")
+    password = st.text_input("비밀번호를 입력하세요", type="password")
     if password != "alohomora":
         st.warning("비밀번호가 올바르지 않습니다.")
         return
+    
+    st.success("환영합니다! 문서 비서를 시작합니다.")
+    
+    
+    #파일 업로드
+    uploaded_file = st.file_uploader("문서파일을 업로드하세요", type=["pdf"])
+    if uploaded_file is not None:
+    
     
     
     
