@@ -43,7 +43,9 @@ def main():
     
     #파일 업로드
     uploaded_file = st.file_uploader("문서파일을 업로드하세요", type=["pdf"])
-    if uploaded_file is not None:
+    #if uploaded_file is not None:
+        #st.success("파일이 업로드되었습니다.")
+        
     
     
     
