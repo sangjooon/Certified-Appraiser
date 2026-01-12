@@ -12,7 +12,8 @@ import pandas as pd
 def main():
     st.set_page_config(
         page_title="문서 비서",
-        page_icon="📄"
+        page_icon="📄",
+        layout="wide"
     )
 
 
