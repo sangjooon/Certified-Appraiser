@@ -22,7 +22,7 @@ def main():
     st.title("문서 비서📄 dev")
     
     #개발 단계
-    st.header("토지의 소재지를 출력합니다.")
+    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.1")
     
     #서비스 설명
     st.markdown(
