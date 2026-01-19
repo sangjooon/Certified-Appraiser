@@ -474,6 +474,7 @@ def extract_land_document_data(text):
     
     #면적 추출
     land_area_in_registry = slice_after_start_to_including_end_reverse(section_for_header_1, " ", "m2")
+    land_area_in_registry = land_area_in_registry - "m2" + "㎡"
     if land_area_in_registry:
         data["면적(토지)"] = land_area_in_registry
     else:
@@ -521,7 +522,7 @@ def main():
     st.title("문서 비서📄 dev")
 
     # 개발 단계
-    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.1")
+    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.2")
 
     # 서비스 설명
     st.markdown(
