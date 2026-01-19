@@ -10,7 +10,7 @@ import re
 import io
 import hashlib
 
-
+from typing import Callable, Optional
 from typing import List, Tuple #slice_between 함수용
 from typing import Optional  #slice including_to_before 함수용
 # ==========================================
@@ -295,14 +295,15 @@ def make_excel_bytes(extracted_data: dict) -> bytes:
 # ==========================================
 # 0 - 3. "전체 처리"를 함수로 묶기 (유틸)
 # ==========================================
-def process_pdf(
-    file_bytes: bytes, api_url: str, secret_key: str
-    ) -> tuple[str, dict, bytes]:
+def process_pdf(file_bytes, api_url, secret_key, progress_cb: Optional[Callable]=None):
     # 1) PDF를 10페이지씩 분할
     chunks = split_pdf_into_chunks(file_bytes, chunk_size=10)
 
     all_raw_text_parts = []
-    for chunk_bytes, start_p, end_p in chunks:
+    for idx, (chunk_bytes, start_p, end_p) in enumerate(chunks, start=1):
+        if progress_cb:
+            progress_cb(idx, len(chunks), start_p, end_p)
+
         result = call_naver_ocr(chunk_bytes, "pdf", api_url, secret_key)
         if not result["ok"]:
             raise RuntimeError(
@@ -319,6 +320,9 @@ def process_pdf(
         all_raw_text_parts.append(
             f"\n######## PDF PAGES {start_p}-{end_p} ########\n{chunk_text}".strip()
         )
+        if progress_cb:
+            progress_cb(total, total, 0, 0)  # 또는 status 메시지용 콜백을 따로
+
 
     raw_text = "\n\n".join(all_raw_text_parts)
     # 2) 규칙 기반 데이터 추출
@@ -586,13 +590,25 @@ def main():
             st.stop()
 
         with st.spinner("OCR 및 데이터 추출 중..."):
+            progress_bar = st.progress(0)
+            status = st.empty()
+
+            def progress_cb(i, total, start_p, end_p):
+                pct = int(i / total * 100)
+                progress_bar.progress(pct)
+                status.write(f"📄 OCR 진행: {i}/{total} 묶음 (페이지 {start_p}~{end_p})")
+
             try:
                 raw_text, extracted_data, excel_bytes = process_pdf(
-                    file_bytes, api_url, secret_key
+                    file_bytes, api_url, secret_key, progress_cb=progress_cb
                 )
             except Exception as e:
                 st.error(str(e))
                 st.stop()
+
+            progress_bar.progress(100)
+            status.write("✅ OCR 완료")
+
 
         st.session_state["raw_text"] = raw_text
         st.session_state["extracted_data"] = extracted_data
