@@ -10,9 +10,8 @@ import re
 import io
 import hashlib
 
-from typing import Callable, Optional
-from typing import List, Tuple #slice_between 함수용
-from typing import Optional  #slice including_to_before 함수용
+from typing import Callable, Optional, List, Tuple
+
 # ==========================================
 # 0 - 0. 글자 자르기 함수
 # ==========================================
@@ -320,8 +319,10 @@ def process_pdf(file_bytes, api_url, secret_key, progress_cb: Optional[Callable]
         all_raw_text_parts.append(
             f"\n######## PDF PAGES {start_p}-{end_p} ########\n{chunk_text}".strip()
         )
-        if progress_cb:
-            progress_cb(total, total, 0, 0)  # 또는 status 메시지용 콜백을 따로
+    # 루프 끝난 뒤
+    if progress_cb:
+        progress_cb(len(chunks), len(chunks), 0, 0)
+
 
 
     raw_text = "\n\n".join(all_raw_text_parts)
@@ -429,7 +430,8 @@ def extract_pdf_category(text: str) -> str:
     """
     PDF 문서의 카테고리를 추출합니다.
     """
-    if "토지이용계획확인서" and "등기사항전부증명서" and "토지 대장" in text:
+    if ("토지이용계획확인서" in text) and ("등기사항전부증명서" in text) and ("토지 대장" in text):
+
         return "토지이용계획확인서_토지등기_토지대장"
     return "기타"
 
@@ -478,7 +480,8 @@ def extract_land_document_data(text):
     
     #면적 추출
     land_area_in_registry = slice_after_start_to_including_end_reverse(section_for_header_1, " ", "m2")
-    land_area_in_registry = land_area_in_registry - "m2" + "㎡"
+    land_area_in_registry = land_area_in_registry.replace("m2", "㎡")
+
     if land_area_in_registry:
         data["면적(토지)"] = land_area_in_registry
     else:
