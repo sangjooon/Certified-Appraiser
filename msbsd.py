@@ -9,6 +9,40 @@ import json
 import re
 import io
 
+from typing import List, Tuple
+
+# ==========================================
+# 0. [유틸] PDF 쪼개기 함수
+# ==========================================
+def split_pdf_into_chunks(pdf_bytes: bytes, chunk_size: int = 10) -> List[Tuple[bytes, int, int]]:
+    """
+    PDF bytes를 chunk_size 페이지 단위로 쪼개서
+    [(chunk_pdf_bytes, start_page(1-indexed), end_page(1-indexed)), ...] 형태로 반환
+    """
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError:
+        # 예전 환경 호환용
+        from PyPDF2 import PdfReader, PdfWriter  # type: ignore
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    total_pages = len(reader.pages)
+    chunks: List[Tuple[bytes, int, int]] = []
+
+    for start in range(0, total_pages, chunk_size):
+        end = min(start + chunk_size, total_pages)
+
+        writer = PdfWriter()
+        for i in range(start, end):
+            writer.add_page(reader.pages[i])
+
+        buf = io.BytesIO()
+        writer.write(buf)
+        chunks.append((buf.getvalue(), start + 1, end))
+
+    return chunks
+
+
 
 # ==========================================
 # 1. [설정] 네이버 API 연결
@@ -44,49 +78,52 @@ def call_naver_ocr(file_bytes, file_ext, api_url, secret_key):
 # ==========================================
 # 2. [전처리] JSON -> 줄글 텍스트 변환
 # ==========================================
-def json_to_text_lines(ocr_json):
+def json_to_text_lines(ocr_json, line_y_threshold=15):
     """
-    OCR 결과를 받아서 사람이 읽는 순서(위->아래, 좌->우)대로
-    깔끔한 텍스트 덩어리로 만듭니다.
+    OCR 결과(JSON)의 모든 페이지(images)를 순서대로 텍스트로 합칩니다.
+    각 페이지는 '위->아래, 좌->우' 정렬 후 줄 단위로 재구성합니다.
     """
     if not ocr_json or "images" not in ocr_json:
         return ""
 
-    fields = ocr_json["images"][0]["fields"]
+    pages_text = []
 
-    # y좌표(줄), x좌표(칸) 정보와 함께 저장
-    extracted_data = []
-    for field in fields:
-        text = field["inferText"]
-        x = field["boundingPoly"]["vertices"][0]["x"]
-        y = field["boundingPoly"]["vertices"][0]["y"]
-        extracted_data.append({"text": text, "x": x, "y": y})
+    for page_idx, img in enumerate(ocr_json["images"], start=1):
+        fields = img.get("fields", [])
+        extracted_data = []
 
-    # Y좌표(높이) 순으로 정렬
-    extracted_data.sort(key=lambda k: k["y"])
+        for field in fields:
+            text = field.get("inferText", "")
+            verts = field.get("boundingPoly", {}).get("vertices", [])
+            if not verts:
+                continue
+            x = verts[0].get("x", 0)
+            y = verts[0].get("y", 0)
+            extracted_data.append({"text": text, "x": x, "y": y})
 
-    full_text = ""
-    if extracted_data:
-        current_line = []
-        last_y = extracted_data[0]["y"]
+        extracted_data.sort(key=lambda k: k["y"])
 
-        for item in extracted_data:
-            # 줄 바꿈 감지 (높이 차이 15px 이상)
-            if abs(item["y"] - last_y) > 15:
-                # 같은 줄 내에서는 왼쪽 -> 오른쪽 정렬
+        full_text = ""
+        if extracted_data:
+            current_line = []
+            last_y = extracted_data[0]["y"]
+
+            for item in extracted_data:
+                if abs(item["y"] - last_y) > line_y_threshold:
+                    current_line.sort(key=lambda k: k["x"])
+                    full_text += " ".join([d["text"] for d in current_line]).strip() + "\n"
+                    current_line = []
+
+                current_line.append(item)
+                last_y = item["y"]
+
+            if current_line:
                 current_line.sort(key=lambda k: k["x"])
-                full_text += " ".join([d["text"] for d in current_line]) + "\n"
-                current_line = []
+                full_text += " ".join([d["text"] for d in current_line]).strip()
 
-            current_line.append(item)
-            last_y = item["y"]
+        pages_text.append(f"\n===== PAGE {page_idx} =====\n{full_text}".strip())
 
-        # 마지막 줄 처리
-        if current_line:
-            current_line.sort(key=lambda k: k["x"])
-            full_text += " ".join([d["text"] for d in current_line])
-
-    return full_text
+    return "\n".join(pages_text).strip()
 
 
 # ==========================================
@@ -191,18 +228,46 @@ def main():
             ext = uploaded_file.name.split(".")[-1].lower()
             fmt = ext if ext in ["jpg", "png"] else "pdf"
 
-            # 1. OCR -> JSON (디버깅 포함)
-            result = call_naver_ocr(file_bytes, fmt, api_url, secret_key)
+            # 1) PDF를 10페이지씩 분할
+            chunks = split_pdf_into_chunks(file_bytes, chunk_size=10)
 
-            if not result["ok"]:
-                st.error(f"OCR 실패: {result.get('status_code')}")
-                st.code(result.get("text") or result.get("error"))
-                return
+            st.info(f"PDF 총 {len(chunks)}개 묶음(최대 10페이지씩)으로 나눠서 OCR 진행합니다.")
 
-            ocr_json = result["json"]
-        
-            # 2. JSON -> 줄글 텍스트 (Raw Text)
-            raw_text = json_to_text_lines(ocr_json)
+            all_raw_text_parts = []
+            progress = st.progress(0)
+            status = st.empty()
+
+            for idx, (chunk_bytes, start_p, end_p) in enumerate(chunks, start=1):
+                status.write(f"🔎 OCR 진행 중: {idx}/{len(chunks)} (페이지 {start_p}~{end_p})")
+
+                # OCR 호출 (항상 pdf로 보냄)
+                result = call_naver_ocr(chunk_bytes, "pdf", api_url, secret_key)
+
+                if not result["ok"]:
+                    st.error(f"OCR 실패: 묶음 {idx} (페이지 {start_p}~{end_p})")
+                    st.error(f"status_code: {result.get('status_code')}")
+                    st.code(result.get("text") or result.get("error"))
+                    return
+
+                ocr_json = result["json"]
+                if not ocr_json:
+                    st.error(f"OCR 응답은 200인데 JSON 파싱이 안 됐어요: 묶음 {idx} (페이지 {start_p}~{end_p})")
+                    st.code(result.get("text"))
+                    return
+
+                # 이 chunk의 텍스트 변환
+                chunk_text = json_to_text_lines(ocr_json)
+
+                # 원래 전체 문서 페이지 범위 라벨을 더 명확히 남김
+                all_raw_text_parts.append(f"\n######## PDF PAGES {start_p}-{end_p} ########\n{chunk_text}".strip())
+
+                progress.progress(int(idx / len(chunks) * 100))
+
+            status.write("✅ OCR 완료")
+
+            # 최종 Raw Text 합치기
+            raw_text = "\n\n".join(all_raw_text_parts)
+
 
             with st.spinner("2단계: 규칙에 맞춰 데이터 뽑는 중..."):
                 # 3. 텍스트 -> 엑셀 데이터 (규칙 적용)
