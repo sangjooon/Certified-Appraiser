@@ -462,6 +462,7 @@ def extract_land_document_data(text):
     # [토지] 추출
     land_address_in_registry_1 = slice_including_to_before(land_registry_section, 
                                                            "[토지]", "표제부")
+    land_address_in_registry_1 = land_address_in_registry_1.replace("[토지]", "").strip()
     if land_address_in_registry_1:
         data["[토지]"] = land_address_in_registry_1
     else:
@@ -481,7 +482,7 @@ def extract_land_document_data(text):
     #지목 추출
     #임시로 면적 변경
     land_area_in_registry = " " + land_area_in_registry
-    land_category_in_registry = slice_from_last_start_before_end(section_for_header_1, " ", "land_area_in_registry")
+    land_category_in_registry = slice_from_last_start_before_end(section_for_header_1, " ", land_area_in_registry)
     #공백 제거
     land_category_in_registry = land_category_in_registry.replace(" ", "")
     if land_category_in_registry:
