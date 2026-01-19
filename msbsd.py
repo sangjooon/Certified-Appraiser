@@ -11,7 +11,240 @@ import io
 import hashlib
 
 
-from typing import List, Tuple
+from typing import List, Tuple #slice_between 함수용
+from typing import Optional  #slice including_to_before 함수용
+# ==========================================
+# 0 - 0. 글자 자르기 함수
+# ==========================================
+# 첫 문자열 포함 마지막 문자열 미포함
+def slice_between(
+    text: str,
+    start: str,
+    end: Optional[str] = None,
+    *,
+    include_start: bool = True,
+    include_end: bool = False,
+    flags: int = 0,
+    ) -> str:
+    """
+    text에서 start ~ end 구간을 잘라 반환.
+    - end가 None이면 start부터 끝까지
+    - include_start/include_end로 경계 포함 여부 제어
+    """
+    m1 = re.search(re.escape(start), text, flags)
+    if not m1:
+        return ""
+
+    s = m1.start() if include_start else m1.end()
+
+    if end is None:
+        return text[s:]
+
+    m2 = re.search(re.escape(end), text[m1.end() :], flags)
+    if not m2:
+        # end가 없으면 start부터 끝까지
+        return text[s:]
+
+    e = (m1.end() + m2.end()) if include_end else (m1.end() + m2.start())
+    return text[s:e]
+
+# 첫 문자열 미포함 마지막 문자열 미포함
+def slice_including_to_before(
+    text: str,
+    start: str,
+    end: Optional[str],
+    *,
+    start_occurrence: int = 1,
+    end_occurrence: int = 1,
+    not_found: str = ""
+    ) -> str:
+    """
+    text에서 start(포함) ~ end(직전) 구간 반환.
+    - start_occurrence: start가 여러 번 나오면 몇 번째 것을 기준으로 할지 (1=첫 번째)
+    - end_occurrence: end가 여러 번 나오면 몇 번째 것을 기준으로 할지 (1=첫 번째)
+    - end가 None이면 start부터 끝까지
+    - start를 못 찾으면 not_found 반환
+    """
+    # start 찾기 (n번째 occurrence)
+    s = -1
+    pos = 0
+    for _ in range(start_occurrence):
+        s = text.find(start, pos)
+        if s == -1:
+            return not_found
+        pos = s + len(start)
+
+    if end is None:
+        return text[s:]
+
+    # end 찾기 (start 뒤에서 n번째 occurrence)
+    e = -1
+    pos = pos  # start 다음 위치부터 탐색
+    for _ in range(end_occurrence):
+        e = text.find(end, pos)
+        if e == -1:
+            # end가 없으면 start부터 끝까지로 처리
+            return text[s:]
+        pos = e + len(end)
+
+    return text[s:e]
+
+# 역주행을 하며 마지막 문자열 미포함, 첫 문자열 포함
+def slice_from_last_start_before_end(
+    text: str,
+    start_marker: str,
+    end_marker: str,
+    *,
+    include_start: bool = True,
+    include_end: bool = False,
+    use_last_end: bool = True,   # end_marker가 여러 개면 마지막 것을 기준
+    not_found: str = ""
+    ) -> str:
+    """
+    end_marker 위치에서 왼쪽으로 역주행하며 가장 가까운 start_marker를 찾아,
+    start_marker ~ end_marker 사이를 잘라 반환.
+
+    기본 동작:
+    - start_marker 포함 (include_start=True)
+    - end_marker 미포함, 직전까지 (include_end=False)
+    - end_marker는 마지막 등장(use_last_end=True)을 기준
+    """
+    # 1) end_marker 위치 찾기
+    end_pos = text.rfind(end_marker) if use_last_end else text.find(end_marker)
+    if end_pos == -1:
+        return not_found
+
+    # 2) end_marker "앞부분"에서 start_marker를 뒤에서 찾기(=역주행 효과)
+    start_pos = text.rfind(start_marker, 0, end_pos)
+    if start_pos == -1:
+        return not_found
+
+    # 3) 포함/미포함 옵션 반영
+    s = start_pos if include_start else start_pos + len(start_marker)
+    e = end_pos + len(end_marker) if include_end else end_pos
+
+    return text[s:e]
+
+# 역주행을 하며 마지막 문자열 미포함, 첫 문자열 포함 인데 정규표현식 사용
+def slice_from_last_start_before_end_regex(
+    text: str,
+    start_pat: str,   # regex
+    end_lit: str,     # literal
+    *,
+    include_start: bool = True,
+    include_end: bool = False,
+    use_last_end: bool = True,
+    flags: int = re.S,
+    not_found: str = ""
+    ) -> str:
+    end_pos = text.rfind(end_lit) if use_last_end else text.find(end_lit)
+    if end_pos == -1:
+        return not_found
+
+    # end_pos 앞쪽에서 start_pat의 "마지막 매치" 찾기
+    prefix = text[:end_pos]
+    last = None
+    for m in re.finditer(start_pat, prefix, flags):
+        last = m
+
+    if last is None:
+        return not_found
+
+    s = last.start() if include_start else last.end()
+    e = end_pos + len(end_lit) if include_end else end_pos
+    return text[s:e]
+
+# 역주행을 하며 마지막 문자열 포함, 첫 문자열 미포함
+def slice_after_start_to_including_end_reverse(
+    text: str,
+    start_marker: str,
+    end_marker: str,
+    *,
+    use_last_end: bool = True,
+    not_found: str = ""
+    ) -> str:
+    """
+    end_marker(기준)를 잡고, 그 앞에서 가장 가까운 start_marker를 '역주행'으로 찾아,
+    start_marker는 제외(미포함)하고 end_marker는 포함하여 반환한다.
+
+    반환 구간:
+      (start_marker의 끝)  ~  (end_marker의 끝)
+
+    - use_last_end=True이면 end_marker가 여러 번 나와도 '마지막 end_marker'를 기준으로 함
+      False면 첫 번째 end_marker를 기준으로 함
+    """
+    # 1) end_marker 위치 잡기
+    end_pos = text.rfind(end_marker) if use_last_end else text.find(end_marker)
+    if end_pos == -1:
+        return not_found
+
+    end_end = end_pos + len(end_marker)  # end_marker 포함이므로 끝 위치는 여기
+
+    # 2) end_marker 앞쪽에서 start_marker를 뒤에서부터(가장 가까운 것) 찾기
+    start_pos = text.rfind(start_marker, 0, end_pos)
+    if start_pos == -1:
+        return not_found
+
+    start_end = start_pos + len(start_marker)  # start_marker 미포함이므로 여기서 시작
+
+    # 3) 구간 반환
+    return text[start_end:end_end]
+
+# 기준 문자열과 같은 문자들만 추출
+def _normalize_token(tok: str) -> str:
+    """
+    OCR 흔들림을 조금 견디게 토큰 정규화.
+    - 양끝 특수문자 제거
+    - 공백류 제거는 token 단계에선 필요 없음
+    - 하이픈은 유지(496-10 같은 지번에 중요)
+    """
+    tok = tok.strip()
+    # 토큰 양끝의 불필요한 문장부호 제거 (하이픈은 유지해야 하므로 제외)
+    tok = re.sub(r"^[\s,.:;(){}\[\]<>\"'`]+|[\s,.:;(){}\[\]<>\"'`]+$", "", tok)
+    return tok
+
+def extract_reference_subsequence(
+    source: str,
+    reference: str,
+    *,
+    require_exact: bool = True
+    ) -> Tuple[bool, str]:
+    """
+    source에서 reference 토큰들을 '순서대로' 찾아서 뽑아냄.
+    - 성공: (True, reference를 정규화해 조합한 문자열)
+    - 실패: (False, 실패 이유)
+    """
+    # 줄바꿈/탭 등 공백 정리
+    source_clean = re.sub(r"\s+", " ", source).strip()
+    ref_clean = re.sub(r"\s+", " ", reference).strip()
+
+    source_tokens = [_normalize_token(t) for t in source_clean.split(" ") if _normalize_token(t)]
+    ref_tokens = [_normalize_token(t) for t in ref_clean.split(" ") if _normalize_token(t)]
+
+    if not ref_tokens:
+        return False, "reference가 비어있음"
+
+    # 투 포인터로 subsequence 매칭
+    j = 0
+    for tok in source_tokens:
+        if tok == ref_tokens[j]:
+            j += 1
+            if j == len(ref_tokens):
+                break
+
+    if j != len(ref_tokens):
+        return False, f"reference 토큰을 전부 찾지 못함 (진행 {j}/{len(ref_tokens)})"
+
+    # 성공 시: reference와 '똑같이' 만들고 싶다면 reference 기반으로 반환
+    result = " ".join(ref_tokens)
+
+    if require_exact:
+        # 완전 동일(정규화 기준) 확인
+        if result != " ".join(ref_tokens):
+            return False, "정규화 후에도 동일 문자열 구성 실패"
+        return True, result
+
+    return True, result
 
 
 # ==========================================
@@ -19,7 +252,7 @@ from typing import List, Tuple
 # ==========================================
 def split_pdf_into_chunks(
     pdf_bytes: bytes, chunk_size: int = 10
-) -> List[Tuple[bytes, int, int]]:
+    ) -> List[Tuple[bytes, int, int]]:
     """
     PDF bytes를 chunk_size 페이지 단위로 쪼개서
     [(chunk_pdf_bytes, start_page(1-indexed), end_page(1-indexed)), ...] 형태로 반환
@@ -64,7 +297,7 @@ def make_excel_bytes(extracted_data: dict) -> bytes:
 # ==========================================
 def process_pdf(
     file_bytes: bytes, api_url: str, secret_key: str
-) -> tuple[str, dict, bytes]:
+    ) -> tuple[str, dict, bytes]:
     # 1) PDF를 10페이지씩 분할
     chunks = split_pdf_into_chunks(file_bytes, chunk_size=10)
 
@@ -88,7 +321,8 @@ def process_pdf(
         )
 
     raw_text = "\n\n".join(all_raw_text_parts)
-    extracted_data = extract_data_by_rules(raw_text)
+    # 2) 규칙 기반 데이터 추출
+    extracted_data = extract_data_by_rules(raw_text, extract_pdf_category(raw_text))
     excel_bytes = make_excel_bytes(extracted_data)
 
     return raw_text, extracted_data, excel_bytes
@@ -185,47 +419,90 @@ def json_to_text_lines(ocr_json, line_y_threshold=15):
 
 
 # ==========================================
-# 3. [핵심] 절대 규칙(Rule)으로 데이터 뽑기 ⚡
+# 3. [전처리] pdf의 카테고리 추출 함수
 # ==========================================
-def extract_data_by_rules(text):
+def extract_pdf_category(text: str) -> str:
+    """
+    PDF 문서의 카테고리를 추출합니다.
+    """
+    if "토지이용계획확인서" and "등기사항전부증명서" and "토지 대장" in text:
+        return "토지이용계획확인서_토지등기_토지대장"
+    return "기타"
+
+
+# ==========================================
+# 4 - 0. [핵심] 절대 규칙(Rule)으로 데이터 뽑기위한 함수 할당하는 함수 ⚡
+# ==========================================
+def extract_data_by_rules(text, pdf_category):
     """
     텍스트 덩어리에서 정규표현식(Regex)을 이용해 핵심 데이터를 추출합니다.
-    *여기에 파트너님이 원하는 규칙을 추가하면 됩니다.*
+    """
+    if pdf_category == "토지이용계획확인서_토지등기_토지대장":
+        return extract_land_document_data(text)
+
+
+# ==========================================
+# 4 - 1. 토지이용계획확인서_토지등기_토지대장 문서용 데이터 추출 함수
+# ==========================================
+def extract_land_document_data(text):
+    """
+    토지 관련 문서에서 데이터를 추출합니다.
     """
     data = {}
 
-    # --- 규칙 1: 소재지 (주소) ---
-    # "소재지" 라는 글자 뒤에 나오는 "경기도 ~~~" 패턴을 찾음
-    # (?m)은 멀티라인 모드, ^는 줄 시작
-    addr_match = re.search(
-        r"(소재지|대지위치)\s*[:]?\s*([가-힣]+[시도].*?)(?=\s지\s*번|\s면\s*적|\s지\s*목|$)",
-        text,
-    )
-    data["소재지"] = addr_match.group(2).strip() if addr_match else "찾지 못함"
+    # --- 규칙 0: 문서 범위 나누기 ---
+    #토지이용계획확인서
+    land_use_plan_section = slice_between(text, "문서확인번호", "등기사항전부증명서")
+    #등기사항전부증명서
+    land_registry_section = slice_between(text, "등기사항전부증명서", "토지 대장")
+    #토지 대장
+    land_register_section = slice_between(text, "토지 대장", "문서확인번호")
 
-    # --- 규칙 2: 지목 (땅의 용도) ---
-    # "지목" 뒤에 나오는 한글 단어 (예: 대, 전, 답, 임야)
-    jimok_match = re.search(r"지\s*목\s*[:]?\s*([가-힣]+)", text)
-    data["지목"] = jimok_match.group(1).strip() if jimok_match else "찾지 못함"
-
-    # --- 규칙 3: 면적 (숫자 + ㎡) ---
-    # 콤마(,)와 소수점(.)을 포함한 숫자 뒤에 "㎡"가 있는 것
-    area_matches = re.findall(r"(\d+(?:,\d+)*(?:\.\d+)?)\s*㎡", text)
-    # 팁: 문서에 면적이 여러 개 나오면 보통 제일 큰 게 전체 면적임
-    if area_matches:
-        valid_areas = [float(a.replace(",", "")) for a in area_matches]
-        data["면적(㎡)"] = max(valid_areas)  # 가장 큰 값 선택
+    # === 표제부에서 필요한 정보 추출 ===
+    # [토지] 추출
+    land_address_in_registry_1 = slice_including_to_before(land_registry_section, 
+                                                           "[토지]", "표제부")
+    if land_address_in_registry_1:
+        data["[토지]"] = land_address_in_registry_1
     else:
-        data["면적(㎡)"] = "찾지 못함"
+        data["[토지]"] = "찾지 못함"
+        
+    # 소재지번, 지목, 면적을 추출하기위한 범위 설정
+    section_for_header_1 = slice_from_last_start_before_end_regex(land_registry_section,
+                                                                r"\n\d\s", "갑 구")
+    
+    #면적 추출
+    land_area_in_registry = slice_after_start_to_including_end_reverse(section_for_header_1, " ", "m2")
+    if land_area_in_registry:
+        data["면적(토지)"] = land_area_in_registry
+    else:
+        data["면적(토지)"] = "찾지 못함"
+    
+    #지목 추출
+    #임시로 면적 변경
+    land_area_in_registry = " " + land_area_in_registry
+    land_category_in_registry = slice_from_last_start_before_end(section_for_header_1, " ", "land_area_in_registry")
+    #공백 제거
+    land_category_in_registry = land_category_in_registry.replace(" ", "")
+    if land_category_in_registry:
+        data["지목(토지)"] = land_category_in_registry
+    else:
+        data["지목(토지)"] = "찾지 못함"
+        
+    #소재 지번 추출
+    true_or_false_of_match_1, land_address_in_registry_2 = extract_reference_subsequence(section_for_header_1,
+                                                                                         land_address_in_registry_1)
+    if land_address_in_registry_2:
+        data["소재지번(토지)"] = land_address_in_registry_2
+    else:
+        data["소재지번(토지)"] = "찾지 못함"
 
-    # --- 규칙 4: 소유자 (이름) ---
-    # "성명" 또는 "소유자" 뒤에 오는 이름 (보통 3글자)
-    owner_match = re.search(r"(성명|소유자)\s*[:]?\s*([가-힣]{3})", text)
-    data["소유자"] = owner_match.group(2).strip() if owner_match else "찾지 못함"
-
-    # --- 규칙 5: (옵션) 원본 텍스트 일부 저장 ---
-    data["원본_요약"] = text[:100].replace("\n", " ") + "..."
-
+    if true_or_false_of_match_1 == False:
+        data["토지 & 소재지번 매칭 여부"] = "X"
+    else:
+        data["토지 & 소재지번 매칭 여부"] = "O"
+        
+        
     return data
 
 
@@ -269,7 +546,6 @@ def main():
         except KeyError:
             api_url = st.text_input("API URL")
             secret_key = st.text_input("Secret Key", type="password")
-
 
     # 파일 업로드
     uploaded_file = st.file_uploader(
