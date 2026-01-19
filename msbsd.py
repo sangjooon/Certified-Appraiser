@@ -256,7 +256,7 @@ def main():
         st.success("파일이 업로드되었습니다.")
 
     #  파일 업로드 및 추출 시작
-    if uploaded_file and st.button("🔍 데이터 추출 시작"):
+    if uploaded_file and st.button("🔍 데이터 추출 시작", key="extract_btn_1"):
         # 업로드된 파일 해시(파일이 바뀌면 자동으로 새로 처리하기 위함)
         file_hash = None
         if uploaded_file is not None:
@@ -264,7 +264,7 @@ def main():
             file_hash = hashlib.sha256(file_bytes).hexdigest()
 
         # 버튼 클릭 시에만 OCR 수행
-        if uploaded_file and st.button("🔍 데이터 추출 시작"):
+        if uploaded_file and st.button("🔍 데이터 추출 시작", key="extract_btn_2"):
             if not api_url:
                 st.error("API 키 확인 필요")
                 return
@@ -306,6 +306,7 @@ def main():
                     data=excel_bytes,
                     file_name=f"규칙추출_{uploaded_file.name}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_excel_btn",
                 )
 
             with col2:
