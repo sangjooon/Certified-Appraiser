@@ -8,11 +8,13 @@ import time
 import json
 import re
 import io
+import hashlib
+
 
 from typing import List, Tuple
 
 # ==========================================
-# 0. [유틸] PDF 쪼개기 함수
+# 0 - 1. [유틸] PDF 쪼개기 함수
 # ==========================================
 def split_pdf_into_chunks(pdf_bytes: bytes, chunk_size: int = 10) -> List[Tuple[bytes, int, int]]:
     """
@@ -42,6 +44,42 @@ def split_pdf_into_chunks(pdf_bytes: bytes, chunk_size: int = 10) -> List[Tuple[
 
     return chunks
 
+
+# ==========================================
+# 0 - 2. 엑셀 bytes 만드는 함수 (유틸)
+# ==========================================
+def make_excel_bytes(extracted_data: dict) -> bytes:
+    df = pd.DataFrame([extracted_data])
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return output.getvalue()
+
+# ==========================================
+# 0 - 3. "전체 처리"를 함수로 묶기 (유틸)
+# ==========================================
+def process_pdf(file_bytes: bytes, api_url: str, secret_key: str) -> tuple[str, dict, bytes]:
+    # 1) PDF를 10페이지씩 분할
+    chunks = split_pdf_into_chunks(file_bytes, chunk_size=10)
+
+    all_raw_text_parts = []
+    for (chunk_bytes, start_p, end_p) in chunks:
+        result = call_naver_ocr(chunk_bytes, "pdf", api_url, secret_key)
+        if not result["ok"]:
+            raise RuntimeError(f"OCR 실패 (페이지 {start_p}~{end_p}): {result.get('status_code')}\n{result.get('text') or result.get('error')}")
+
+        ocr_json = result["json"]
+        if not ocr_json:
+            raise RuntimeError(f"OCR JSON 파싱 실패 (페이지 {start_p}~{end_p})\n{result.get('text')}")
+
+        chunk_text = json_to_text_lines(ocr_json)
+        all_raw_text_parts.append(f"\n######## PDF PAGES {start_p}-{end_p} ########\n{chunk_text}".strip())
+
+    raw_text = "\n\n".join(all_raw_text_parts)
+    extracted_data = extract_data_by_rules(raw_text)
+    excel_bytes = make_excel_bytes(extracted_data)
+
+    return raw_text, extracted_data, excel_bytes
 
 
 # ==========================================
@@ -219,88 +257,63 @@ def main():
 
     #  파일 업로드 및 추출 시작
     if uploaded_file and st.button("🔍 데이터 추출 시작"):
-        if not api_url:
-            st.error("API 키 확인 필요")
-            return
-
-        with st.spinner("1단계: 문서를 텍스트로 변환 중..."):
+        # 업로드된 파일 해시(파일이 바뀌면 자동으로 새로 처리하기 위함)
+        file_hash = None
+        if uploaded_file is not None:
             file_bytes = uploaded_file.getvalue()
-            ext = uploaded_file.name.split(".")[-1].lower()
-            fmt = ext if ext in ["jpg", "png"] else "pdf"
+            file_hash = hashlib.sha256(file_bytes).hexdigest()
 
-            # 1) PDF를 10페이지씩 분할
-            chunks = split_pdf_into_chunks(file_bytes, chunk_size=10)
+        # 버튼 클릭 시에만 OCR 수행
+        if uploaded_file and st.button("🔍 데이터 추출 시작"):
+            if not api_url:
+                st.error("API 키 확인 필요")
+                return
 
-            st.info(f"PDF 총 {len(chunks)}개 묶음(최대 10페이지씩)으로 나눠서 OCR 진행합니다.")
+            # 이전 결과가 다른 파일이면 초기화
+            if st.session_state.get("file_hash") != file_hash:
+                st.session_state.pop("raw_text", None)
+                st.session_state.pop("extracted_data", None)
+                st.session_state.pop("excel_bytes", None)
 
-            all_raw_text_parts = []
-            progress = st.progress(0)
-            status = st.empty()
-
-            for idx, (chunk_bytes, start_p, end_p) in enumerate(chunks, start=1):
-                status.write(f"🔎 OCR 진행 중: {idx}/{len(chunks)} (페이지 {start_p}~{end_p})")
-
-                # OCR 호출 (항상 pdf로 보냄)
-                result = call_naver_ocr(chunk_bytes, "pdf", api_url, secret_key)
-
-                if not result["ok"]:
-                    st.error(f"OCR 실패: 묶음 {idx} (페이지 {start_p}~{end_p})")
-                    st.error(f"status_code: {result.get('status_code')}")
-                    st.code(result.get("text") or result.get("error"))
+            with st.spinner("OCR 및 데이터 추출 중..."):
+                try:
+                    raw_text, extracted_data, excel_bytes = process_pdf(file_bytes, api_url, secret_key)
+                except Exception as e:
+                    st.error(str(e))
                     return
 
-                ocr_json = result["json"]
-                if not ocr_json:
-                    st.error(f"OCR 응답은 200인데 JSON 파싱이 안 됐어요: 묶음 {idx} (페이지 {start_p}~{end_p})")
-                    st.code(result.get("text"))
-                    return
+            st.session_state["file_hash"] = file_hash
+            st.session_state["raw_text"] = raw_text
+            st.session_state["extracted_data"] = extracted_data
+            st.session_state["excel_bytes"] = excel_bytes
 
-                # 이 chunk의 텍스트 변환
-                chunk_text = json_to_text_lines(ocr_json)
+        # ✅ rerun이 되어도 아래는 session_state에 결과가 남아있으면 계속 보여줌
+        if st.session_state.get("extracted_data") is not None:
+            extracted_data = st.session_state["extracted_data"]
+            raw_text = st.session_state["raw_text"]
+            excel_bytes = st.session_state["excel_bytes"]
 
-                # 원래 전체 문서 페이지 범위 라벨을 더 명확히 남김
-                all_raw_text_parts.append(f"\n######## PDF PAGES {start_p}-{end_p} ########\n{chunk_text}".strip())
+            st.divider()
+            col1, col2 = st.columns([1, 1])
 
-                progress.progress(int(idx / len(chunks) * 100))
+            with col1:
+                st.subheader("✅ 추출 결과 (Excel)")
+                df = pd.DataFrame([extracted_data])
+                st.dataframe(df.T, use_container_width=True)
 
-            status.write("✅ OCR 완료")
+                st.download_button(
+                    label="📥 엑셀 파일 다운로드",
+                    data=excel_bytes,
+                    file_name=f"규칙추출_{uploaded_file.name}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
-            # 최종 Raw Text 합치기
-            raw_text = "\n\n".join(all_raw_text_parts)
+            with col2:
+                st.subheader("📄 AI가 읽은 원본 텍스트")
+                st.text_area("OCR Raw Text", raw_text, height=400)
+        else:
+            st.info("파일 업로드 후 '데이터 추출 시작'을 누르면 결과가 여기에 유지됩니다.")
 
-
-            with st.spinner("2단계: 규칙에 맞춰 데이터 뽑는 중..."):
-                # 3. 텍스트 -> 엑셀 데이터 (규칙 적용)
-                extracted_data = extract_data_by_rules(raw_text)
-
-                # 결과 보여주기
-                st.divider()
-                col1, col2 = st.columns([1, 1])
-
-                with col1:
-                    st.subheader("✅ 추출 결과 (Excel)")
-                    df = pd.DataFrame(
-                        [extracted_data]
-                    )  # 리스트로 감싸서 행으로 만듦
-                    st.dataframe(
-                        df.T, use_container_width=True
-                    )  # 보기 좋게 행/열 바꿔서 표시
-
-                    # 엑셀 다운로드
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                        df.to_excel(writer, index=False)
-
-                    st.download_button(
-                        label="📥 엑셀 파일 다운로드",
-                        data=output.getvalue(),
-                        file_name=f"규칙추출_{uploaded_file.name}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-
-                with col2:
-                    st.subheader("📄 AI가 읽은 원본 텍스트")
-                    st.text_area("OCR Raw Text", raw_text, height=400)
 
             
 
