@@ -479,8 +479,9 @@ def extract_land_document_data(text):
                                                                 r"\n\d\s", "갑 구")
     
     #면적 추출
-    land_area_in_registry = slice_after_start_to_including_end_reverse(section_for_header_1, " ", "m2")
-    land_area_in_registry = land_area_in_registry.replace("m2", "㎡")
+    m2 = re.search(r"(\d+(?:,\d+)*(?:\.\d+)?)\s*m2", section_for_header_1, re.I)
+    land_area_in_registry = (m2.group(1).replace(",", "") + "m2") if m2 else ""
+
 
     if land_area_in_registry:
         data["면적(토지)"] = land_area_in_registry
@@ -488,11 +489,9 @@ def extract_land_document_data(text):
         data["면적(토지)"] = "찾지 못함"
     
     #지목 추출
-    #임시로 면적 변경
-    land_area_in_registry = " " + land_area_in_registry
-    land_category_in_registry = slice_from_last_start_before_end(section_for_header_1, " ", land_area_in_registry)
-    #공백 제거
-    land_category_in_registry = land_category_in_registry.replace(" ", "")
+    
+    m = re.search(r"([가-힣]+)\s*\d+(?:,\d+)*(?:\.\d+)?\s*m2", section_for_header_1, re.I)
+    land_category_in_registry = m.group(1) if m else ""
     if land_category_in_registry:
         data["지목(토지)"] = land_category_in_registry
     else:
