@@ -22,19 +22,25 @@ def call_naver_ocr(file_bytes, file_ext, api_url, secret_key):
         "timestamp": int(round(time.time() * 1000)),
     }
 
-    payload = {"message": json.dumps(request_json).encode("UTF-8")}
+    payload = {"message": json.dumps(request_json)}
     headers = {"X-OCR-SECRET": secret_key}
-    files = [("file", file_bytes)]
+
+    content_type = "application/pdf" if file_ext == "pdf" else "image/jpeg"
+    files = {"file": (f"upload.{file_ext}", file_bytes, content_type)}
 
     try:
-        response = requests.post(api_url, headers=headers, data=payload, files=files)
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except:
-        return None
+        r = requests.post(api_url, headers=headers, data=payload, files=files, timeout=60)
 
-
+        return {
+            "ok": (r.status_code == 200),
+            "status_code": r.status_code,
+            "text": r.text[:2000],
+            "json": (r.json() if "application/json" in r.headers.get("Content-Type", "") else None),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    
+    
 # ==========================================
 # 2. [전처리] JSON -> 줄글 텍스트 변환
 # ==========================================
@@ -185,49 +191,53 @@ def main():
             ext = uploaded_file.name.split(".")[-1].lower()
             fmt = ext if ext in ["jpg", "png"] else "pdf"
 
-            # 1. OCR -> JSON
-            ocr_json = call_naver_ocr(file_bytes, fmt, api_url, secret_key)
+            # 1. OCR -> JSON (디버깅 포함)
+            result = call_naver_ocr(file_bytes, fmt, api_url, secret_key)
 
-            if ocr_json:
-                # 2. JSON -> 줄글 텍스트 (Raw Text)
-                raw_text = json_to_text_lines(ocr_json)
+            if not result["ok"]:
+                st.error(f"OCR 실패: {result.get('status_code')}")
+                st.code(result.get("text") or result.get("error"))
+                return
 
-                with st.spinner("2단계: 규칙에 맞춰 데이터 뽑는 중..."):
-                    # 3. 텍스트 -> 엑셀 데이터 (규칙 적용)
-                    extracted_data = extract_data_by_rules(raw_text)
+            ocr_json = result["json"]
+        
+            # 2. JSON -> 줄글 텍스트 (Raw Text)
+            raw_text = json_to_text_lines(ocr_json)
 
-                    # 결과 보여주기
-                    st.divider()
-                    col1, col2 = st.columns([1, 1])
+            with st.spinner("2단계: 규칙에 맞춰 데이터 뽑는 중..."):
+                # 3. 텍스트 -> 엑셀 데이터 (규칙 적용)
+                extracted_data = extract_data_by_rules(raw_text)
 
-                    with col1:
-                        st.subheader("✅ 추출 결과 (Excel)")
-                        df = pd.DataFrame(
-                            [extracted_data]
-                        )  # 리스트로 감싸서 행으로 만듦
-                        st.dataframe(
-                            df.T, use_container_width=True
-                        )  # 보기 좋게 행/열 바꿔서 표시
+                # 결과 보여주기
+                st.divider()
+                col1, col2 = st.columns([1, 1])
 
-                        # 엑셀 다운로드
-                        output = io.BytesIO()
-                        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                            df.to_excel(writer, index=False)
+                with col1:
+                    st.subheader("✅ 추출 결과 (Excel)")
+                    df = pd.DataFrame(
+                        [extracted_data]
+                    )  # 리스트로 감싸서 행으로 만듦
+                    st.dataframe(
+                        df.T, use_container_width=True
+                    )  # 보기 좋게 행/열 바꿔서 표시
 
-                        st.download_button(
-                            label="📥 엑셀 파일 다운로드",
-                            data=output.getvalue(),
-                            file_name=f"규칙추출_{uploaded_file.name}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        )
+                    # 엑셀 다운로드
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                        df.to_excel(writer, index=False)
 
-                    with col2:
-                        st.subheader("📄 AI가 읽은 원본 텍스트")
-                        st.text_area("OCR Raw Text", raw_text, height=400)
+                    st.download_button(
+                        label="📥 엑셀 파일 다운로드",
+                        data=output.getvalue(),
+                        file_name=f"규칙추출_{uploaded_file.name}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
 
-            else:
-                st.error("OCR 분석에 실패했습니다.")
+                with col2:
+                    st.subheader("📄 AI가 읽은 원본 텍스트")
+                    st.text_area("OCR Raw Text", raw_text, height=400)
 
+            
 
 # 실행
 if __name__ == "__main__":
