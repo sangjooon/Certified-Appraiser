@@ -13,10 +13,13 @@ import hashlib
 
 from typing import List, Tuple
 
+
 # ==========================================
 # 0 - 1. [유틸] PDF 쪼개기 함수
 # ==========================================
-def split_pdf_into_chunks(pdf_bytes: bytes, chunk_size: int = 10) -> List[Tuple[bytes, int, int]]:
+def split_pdf_into_chunks(
+    pdf_bytes: bytes, chunk_size: int = 10
+) -> List[Tuple[bytes, int, int]]:
     """
     PDF bytes를 chunk_size 페이지 단위로 쪼개서
     [(chunk_pdf_bytes, start_page(1-indexed), end_page(1-indexed)), ...] 형태로 반환
@@ -55,25 +58,34 @@ def make_excel_bytes(extracted_data: dict) -> bytes:
         df.to_excel(writer, index=False)
     return output.getvalue()
 
+
 # ==========================================
 # 0 - 3. "전체 처리"를 함수로 묶기 (유틸)
 # ==========================================
-def process_pdf(file_bytes: bytes, api_url: str, secret_key: str) -> tuple[str, dict, bytes]:
+def process_pdf(
+    file_bytes: bytes, api_url: str, secret_key: str
+) -> tuple[str, dict, bytes]:
     # 1) PDF를 10페이지씩 분할
     chunks = split_pdf_into_chunks(file_bytes, chunk_size=10)
 
     all_raw_text_parts = []
-    for (chunk_bytes, start_p, end_p) in chunks:
+    for chunk_bytes, start_p, end_p in chunks:
         result = call_naver_ocr(chunk_bytes, "pdf", api_url, secret_key)
         if not result["ok"]:
-            raise RuntimeError(f"OCR 실패 (페이지 {start_p}~{end_p}): {result.get('status_code')}\n{result.get('text') or result.get('error')}")
+            raise RuntimeError(
+                f"OCR 실패 (페이지 {start_p}~{end_p}): {result.get('status_code')}\n{result.get('text') or result.get('error')}"
+            )
 
         ocr_json = result["json"]
         if not ocr_json:
-            raise RuntimeError(f"OCR JSON 파싱 실패 (페이지 {start_p}~{end_p})\n{result.get('text')}")
+            raise RuntimeError(
+                f"OCR JSON 파싱 실패 (페이지 {start_p}~{end_p})\n{result.get('text')}"
+            )
 
         chunk_text = json_to_text_lines(ocr_json)
-        all_raw_text_parts.append(f"\n######## PDF PAGES {start_p}-{end_p} ########\n{chunk_text}".strip())
+        all_raw_text_parts.append(
+            f"\n######## PDF PAGES {start_p}-{end_p} ########\n{chunk_text}".strip()
+        )
 
     raw_text = "\n\n".join(all_raw_text_parts)
     extracted_data = extract_data_by_rules(raw_text)
@@ -101,18 +113,24 @@ def call_naver_ocr(file_bytes, file_ext, api_url, secret_key):
     files = {"file": (f"upload.{file_ext}", file_bytes, content_type)}
 
     try:
-        r = requests.post(api_url, headers=headers, data=payload, files=files, timeout=60)
+        r = requests.post(
+            api_url, headers=headers, data=payload, files=files, timeout=60
+        )
 
         return {
             "ok": (r.status_code == 200),
             "status_code": r.status_code,
             "text": r.text[:2000],
-            "json": (r.json() if "application/json" in r.headers.get("Content-Type", "") else None),
+            "json": (
+                r.json()
+                if "application/json" in r.headers.get("Content-Type", "")
+                else None
+            ),
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
-    
-    
+
+
 # ==========================================
 # 2. [전처리] JSON -> 줄글 텍스트 변환
 # ==========================================
@@ -149,7 +167,9 @@ def json_to_text_lines(ocr_json, line_y_threshold=15):
             for item in extracted_data:
                 if abs(item["y"] - last_y) > line_y_threshold:
                     current_line.sort(key=lambda k: k["x"])
-                    full_text += " ".join([d["text"] for d in current_line]).strip() + "\n"
+                    full_text += (
+                        " ".join([d["text"] for d in current_line]).strip() + "\n"
+                    )
                     current_line = []
 
                 current_line.append(item)
@@ -246,77 +266,88 @@ def main():
         try:
             api_url = st.secrets["NAVER_API_URL"]
             secret_key = st.secrets["NAVER_SECRET_KEY"]
-        except:
+        except KeyError:
             api_url = st.text_input("API URL")
             secret_key = st.text_input("Secret Key", type="password")
 
+
     # 파일 업로드
-    uploaded_file = st.file_uploader("문서파일을 업로드하세요", type=["pdf"])
+    uploaded_file = st.file_uploader(
+        "문서파일을 업로드하세요", type=["pdf"], key="uploader_pdf"
+    )
     if uploaded_file is not None:
         st.success("파일이 업로드되었습니다.")
 
-    #  파일 업로드 및 추출 시작
-    if uploaded_file and st.button("🔍 데이터 추출 시작", key="extract_btn_1"):
-        # 업로드된 파일 해시(파일이 바뀌면 자동으로 새로 처리하기 위함)
-        file_hash = None
-        if uploaded_file is not None:
-            file_bytes = uploaded_file.getvalue()
-            file_hash = hashlib.sha256(file_bytes).hexdigest()
+    # 업로드된 파일 해시 계산 (파일이 바뀌면 결과 초기화용)
+    file_hash = None
+    file_bytes = None
+    if uploaded_file is not None:
+        file_bytes = uploaded_file.getvalue()
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
 
-        # 버튼 클릭 시에만 OCR 수행
-        if uploaded_file and st.button("🔍 데이터 추출 시작", key="extract_btn_2"):
-            if not api_url:
-                st.error("API 키 확인 필요")
-                return
-
-            # 이전 결과가 다른 파일이면 초기화
-            if st.session_state.get("file_hash") != file_hash:
-                st.session_state.pop("raw_text", None)
-                st.session_state.pop("extracted_data", None)
-                st.session_state.pop("excel_bytes", None)
-
-            with st.spinner("OCR 및 데이터 추출 중..."):
-                try:
-                    raw_text, extracted_data, excel_bytes = process_pdf(file_bytes, api_url, secret_key)
-                except Exception as e:
-                    st.error(str(e))
-                    return
-
+        # 파일이 바뀌면 이전 결과 자동 초기화
+        if st.session_state.get("file_hash") != file_hash:
+            st.session_state.pop("raw_text", None)
+            st.session_state.pop("extracted_data", None)
+            st.session_state.pop("excel_bytes", None)
             st.session_state["file_hash"] = file_hash
-            st.session_state["raw_text"] = raw_text
-            st.session_state["extracted_data"] = extracted_data
-            st.session_state["excel_bytes"] = excel_bytes
 
-        # ✅ rerun이 되어도 아래는 session_state에 결과가 남아있으면 계속 보여줌
-        if st.session_state.get("extracted_data") is not None:
-            extracted_data = st.session_state["extracted_data"]
-            raw_text = st.session_state["raw_text"]
-            excel_bytes = st.session_state["excel_bytes"]
+    # 버튼은 딱 1번만 렌더링
+    clicked = st.button(
+        "🔍 데이터 추출 시작",
+        key="extract_btn",
+        disabled=(uploaded_file is None),
+    )
 
-            st.divider()
-            col1, col2 = st.columns([1, 1])
+    if clicked:
+        if not api_url:
+            st.error("API URL 확인 필요")
+            st.stop()
+        if not secret_key:
+            st.error("Secret Key 확인 필요")
+            st.stop()
 
-            with col1:
-                st.subheader("✅ 추출 결과 (Excel)")
-                df = pd.DataFrame([extracted_data])
-                st.dataframe(df.T, use_container_width=True)
-
-                st.download_button(
-                    label="📥 엑셀 파일 다운로드",
-                    data=excel_bytes,
-                    file_name=f"규칙추출_{uploaded_file.name}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_excel_btn",
+        with st.spinner("OCR 및 데이터 추출 중..."):
+            try:
+                raw_text, extracted_data, excel_bytes = process_pdf(
+                    file_bytes, api_url, secret_key
                 )
+            except Exception as e:
+                st.error(str(e))
+                st.stop()
 
-            with col2:
-                st.subheader("📄 AI가 읽은 원본 텍스트")
-                st.text_area("OCR Raw Text", raw_text, height=400)
-        else:
-            st.info("파일 업로드 후 '데이터 추출 시작'을 누르면 결과가 여기에 유지됩니다.")
+        st.session_state["raw_text"] = raw_text
+        st.session_state["extracted_data"] = extracted_data
+        st.session_state["excel_bytes"] = excel_bytes
 
+    # ✅ 결과는 session_state에 있으면 언제든 표시 (rerun돼도 유지)
+    if st.session_state.get("extracted_data") is not None:
+        extracted_data = st.session_state["extracted_data"]
+        raw_text = st.session_state["raw_text"]
+        excel_bytes = st.session_state["excel_bytes"]
 
-            
+        st.divider()
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            st.subheader("✅ 추출 결과 (Excel)")
+            df = pd.DataFrame([extracted_data])
+            st.dataframe(df.T, use_container_width=True)
+
+            st.download_button(
+                label="📥 엑셀 파일 다운로드",
+                data=excel_bytes,
+                file_name=f"규칙추출_{uploaded_file.name if uploaded_file else 'result'}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_excel_btn",
+            )
+
+        with col2:
+            st.subheader("📄 AI가 읽은 원본 텍스트")
+            st.text_area("OCR Raw Text", raw_text, height=400, key="raw_text_area")
+    else:
+        st.info("파일 업로드 후 '데이터 추출 시작'을 누르면 결과가 여기에 유지됩니다.")
+
 
 # 실행
 if __name__ == "__main__":
