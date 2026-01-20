@@ -648,30 +648,30 @@ def extract_land_document_data(text):
         include_end=False,
     )
 
-    # [수정 1] Regex 결과가 None일 때와 Match 객체일 때를 구분하여 '문자열'로 변환
-    _m_purpose = re.search(r"^\S+", land_registry_section_gabgu_last)
-    # 찾으면 .group(0)으로 글자만 꺼내고, 못 찾으면 빈 문자열 ""
-    purpose_str = _m_purpose.group(0) if _m_purpose else ""
-
-    if purpose_str:
-        data["갑구_등기목적"] = purpose_str
+    # 갑구에서 등기목적 추출
+    land_registry_section_gabgu_last_purpose = re.search(
+        r"^\S+", land_registry_section_gabgu_last
+    )
+    if land_registry_section_gabgu_last_purpose:
+        data["갑구_등기목적"] = land_registry_section_gabgu_last_purpose.group(0)
     else:
         data["갑구_등기목적"] = "찾지 못함"
 
-    # [수정 2] 실수로 변수명을 따옴표로 감쌌던 부분 수정 ("variable" -> variable)
+    # 갑구에서 접 수 추출
     land_registry_section_gabgu_last_date_1 = slice_including_to_before(
         land_registry_section_gabgu_last,
-        purpose_str + " ",  # 이제 문자열이므로 + 연산 가능
+        land_registry_section_gabgu_last_purpose + " ",
         " ",
     )
 
-    # [수정 3] Regex 결과 안전하게 문자열 변환
-    _m_ho = re.search(r"제\s*\d+\s*호", land_registry_section_gabgu_last)
-    ho_str = _m_ho.group(0) if _m_ho else ""
-
-    if ho_str:
+    land_registry_section_gabgu_last_date_1_ho = re.search(
+        r"제\s*\d+\s*호", land_registry_section_gabgu_last
+    )
+    if land_registry_section_gabgu_last_date_1_ho:
         data["토지_등기_갑구_접수"] = (
-            land_registry_section_gabgu_last_date_1 + " " + ho_str
+            land_registry_section_gabgu_last_date_1
+            + " "
+            + land_registry_section_gabgu_last_date_1_ho
         )
     else:
         data["토지_등기_갑구_접수"] = "찾지 못함"
@@ -689,14 +689,13 @@ def extract_land_document_data(text):
     else:
         data["토지_등기_갑구_등기원인"] = "찾지 못함"
 
-    # [수정 4] remove_reference_subsequence에 전달할 때 모두 문자열인지 확인
-    # 여기서 None이 하나라도 섞이면 에러가 남. 위에서 안전하게 변환했으므로 이제 OK.
+    # 갑구에서 권리자 및 기타사항 추출
     ok_true_or_false_of_match_2, land_registry_section_gabgu_last_right_holder = (
         remove_reference_subsequence(
             land_registry_section_gabgu_last,
-            purpose_str
+            land_registry_section_gabgu_last_purpose
             + land_registry_section_gabgu_last_date_1
-            + ho_str
+            + land_registry_section_gabgu_last_date_1_ho
             + land_registry_section_gabgu_last_cause
             + "매매",
         )
@@ -750,7 +749,7 @@ def main():
     st.title("문서 비서📄 dev")
 
     # 개발 단계
-    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.3")
+    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.2")
 
     # 서비스 설명
     st.markdown(
