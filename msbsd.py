@@ -648,65 +648,90 @@ def extract_land_document_data(text):
         include_end=False,
     )
 
-    # 갑구에서 등기목적 추출
-    land_registry_section_gabgu_last_purpose = re.search(
-        r"^\S+", land_registry_section_gabgu_last
-    )
-    if land_registry_section_gabgu_last_purpose:
-        data["갑구_등기목적"] = land_registry_section_gabgu_last_purpose.group(0)
-    else:
-        data["갑구_등기목적"] = "찾지 못함"
+    # 갑구에서 등기목적 추출 (문자열로)
 
-    # 갑구에서 접 수 추출
-    land_registry_section_gabgu_last_date_1 = slice_including_to_before(
+
+m_purpose = re.search(r"^\S+", land_registry_section_gabgu_last)
+land_registry_section_gabgu_last_purpose = m_purpose.group(0) if m_purpose else ""
+if land_registry_section_gabgu_last_purpose:
+    data["갑구_등기목적"] = land_registry_section_gabgu_last_purpose
+else:
+    data["갑구_등기목적"] = "찾지 못함"
+
+# 갑구에서 접수 '제 n 호' 추출 (문자열로)
+m_ho = re.search(r"제\s*[1-9]\d*\s*호", land_registry_section_gabgu_last)
+land_registry_section_gabgu_last_date_1_ho = m_ho.group(0) if m_ho else ""
+
+# 갑구에서 접수일자 추출 (등기목적 다음 첫 토큰)
+m_date = (
+    re.search(
+        rf"{re.escape(land_registry_section_gabgu_last_purpose)}\s+(\S+)",
         land_registry_section_gabgu_last,
-        land_registry_section_gabgu_last_purpose + " ",
-        " ",
     )
+    if land_registry_section_gabgu_last_purpose
+    else None
+)
+land_registry_section_gabgu_last_date_1 = m_date.group(1) if m_date else ""
 
-    land_registry_section_gabgu_last_date_1_ho = re.search(
-        r"제\s*\d+\s*호", land_registry_section_gabgu_last
+# 접수 저장
+if (
+    land_registry_section_gabgu_last_date_1
+    and land_registry_section_gabgu_last_date_1_ho
+):
+    data["토지_등기_갑구_접수"] = (
+        f"{land_registry_section_gabgu_last_date_1} {land_registry_section_gabgu_last_date_1_ho}"
     )
-    if land_registry_section_gabgu_last_date_1_ho:
-        data["토지_등기_갑구_접수"] = (
-            land_registry_section_gabgu_last_date_1
-            + " "
-            + land_registry_section_gabgu_last_date_1_ho
-        )
-    else:
-        data["토지_등기_갑구_접수"] = "찾지 못함"
+else:
+    data["토지_등기_갑구_접수"] = "찾지 못함"
 
-    # 갑구에서 등기원인 추출
-    land_registry_section_gabgu_last_cause = slice_including_to_before(
+# 갑구에서 등기원인 추출 (접수일자 + 제n호 다음 토큰)
+m_cause = (
+    re.search(
+        rf"{re.escape(land_registry_section_gabgu_last_date_1)}\s+{re.escape(land_registry_section_gabgu_last_date_1_ho)}\s+(\S+)",
         land_registry_section_gabgu_last,
-        land_registry_section_gabgu_last_date_1 + " ",
-        " ",
     )
-    if land_registry_section_gabgu_last_cause:
-        data["토지_등기_갑구_등기원인"] = (
-            land_registry_section_gabgu_last_cause + " " + "매매"
-        )
-    else:
-        data["토지_등기_갑구_등기원인"] = "찾지 못함"
-
-    # 갑구에서 권리자 및 기타사항 추출
-    ok_true_or_false_of_match_2, land_registry_section_gabgu_last_right_holder = (
-        remove_reference_subsequence(
-            land_registry_section_gabgu_last,
-            land_registry_section_gabgu_last_purpose
-            + land_registry_section_gabgu_last_date_1
-            + land_registry_section_gabgu_last_date_1_ho
-            + land_registry_section_gabgu_last_cause
-            + "매매",
-        )
+    if (
+        land_registry_section_gabgu_last_date_1
+        and land_registry_section_gabgu_last_date_1_ho
     )
+    else None
+)
+land_registry_section_gabgu_last_cause = m_cause.group(1) if m_cause else ""
 
-    if ok_true_or_false_of_match_2:
-        data["토지_등기_갑구_권리자및기타사항"] = (
-            land_registry_section_gabgu_last_right_holder.strip()
-        )
-    else:
-        data["토지_등기_갑구_권리자및기타사항"] = "찾지 못함"
+if land_registry_section_gabgu_last_cause:
+    data["토지_등기_갑구_등기원인"] = land_registry_section_gabgu_last_cause + " 매매"
+else:
+    data["토지_등기_갑구_등기원인"] = "찾지 못함"
+
+# 갑구에서 권리자 및 기타사항 추출: 위에서 뽑은 것들을 reference로 만들어 제거
+ref_to_remove = " ".join(
+    [
+        x
+        for x in [
+            land_registry_section_gabgu_last_purpose,
+            land_registry_section_gabgu_last_date_1,
+            land_registry_section_gabgu_last_date_1_ho,
+            land_registry_section_gabgu_last_cause,
+            "매매",
+        ]
+        if x
+    ]
+).strip()
+
+ok_true_or_false_of_match_2, land_registry_section_gabgu_last_right_holder = (
+    remove_reference_subsequence(
+        land_registry_section_gabgu_last,
+        ref_to_remove,
+        fail_if_not_found=False,  # 일부만 제거하고 남긴 값을 쓰기 위해 False 추천
+    )
+)
+
+if ok_true_or_false_of_match_2:
+    data["토지_등기_갑구_권리자및기타사항"] = (
+        land_registry_section_gabgu_last_right_holder.strip()
+    )
+else:
+    data["토지_등기_갑구_권리자및기타사항"] = "찾지 못함"
 
     # 갑구에서 소유자 찾기
     land_registry_section_gabgu_owner = re.search(
