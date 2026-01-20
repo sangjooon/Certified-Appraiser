@@ -28,7 +28,7 @@ def slice_between(
     include_start: bool = True,
     include_end: bool = False,
     flags: int = 0,
-    ) -> str:
+) -> str:
     """
     text에서 start ~ end 구간을 잘라 반환.
     - end가 None이면 start부터 끝까지
@@ -61,7 +61,7 @@ def slice_including_to_before(
     start_occurrence: int = 1,
     end_occurrence: int = 1,
     not_found: str = "",
-    ) -> str:
+) -> str:
     """
     text에서 start(포함) ~ end(직전) 구간 반환.
     - start_occurrence: start가 여러 번 나오면 몇 번째 것을 기준으로 할지 (1=첫 번째)
@@ -104,7 +104,7 @@ def slice_from_last_start_before_end(
     include_end: bool = False,
     use_last_end: bool = True,  # end_marker가 여러 개면 마지막 것을 기준
     not_found: str = "",
-    ) -> str:
+) -> str:
     """
     end_marker 위치에서 왼쪽으로 역주행하며 가장 가까운 start_marker를 찾아,
     start_marker ~ end_marker 사이를 잘라 반환.
@@ -141,7 +141,7 @@ def slice_from_last_start_before_end_any(
     include_end: bool = False,
     use_last_end: bool = True,
     not_found: str = "",
-    ) -> str:
+) -> str:
     # 1) end_marker 위치
     end_pos = text.rfind(end_marker) if use_last_end else text.find(end_marker)
     if end_pos == -1:
@@ -177,7 +177,7 @@ def slice_from_last_start_before_end_regex(
     use_last_end: bool = True,
     flags: int = re.S,
     not_found: str = "",
-    ) -> str:
+) -> str:
     end_pos = text.rfind(end_lit) if use_last_end else text.find(end_lit)
     if end_pos == -1:
         return not_found
@@ -204,7 +204,7 @@ def slice_after_start_to_including_end_reverse(
     *,
     use_last_end: bool = True,
     not_found: str = "",
-    ) -> str:
+) -> str:
     """
     end_marker(기준)를 잡고, 그 앞에서 가장 가까운 start_marker를 '역주행'으로 찾아,
     start_marker는 제외(미포함)하고 end_marker는 포함하여 반환한다.
@@ -249,7 +249,7 @@ def _normalize_token(tok: str) -> str:
 
 def extract_reference_subsequence(
     source: str, reference: str, *, require_exact: bool = True
-    ) -> Tuple[bool, str]:
+) -> Tuple[bool, str]:
     """
     source에서 reference 토큰들을 '순서대로' 찾아서 뽑아냄.
     - 성공: (True, reference를 정규화해 조합한 문자열)
@@ -295,7 +295,7 @@ def extract_reference_subsequence(
 # 기준 문자열과 다른 단어들만 추출
 def remove_reference_subsequence(
     source: str, reference: str, *, fail_if_not_found: bool = True
-    ) -> Tuple[bool, str]:
+) -> Tuple[bool, str]:
     """
     source에서 reference 토큰들을 '순서대로' 매칭해 제거하고,
     남은 토큰들을 공백으로 합쳐 반환.
@@ -337,7 +337,7 @@ def remove_reference_subsequence(
 # ==========================================
 def split_pdf_into_chunks(
     pdf_bytes: bytes, chunk_size: int = 10
-    ) -> List[Tuple[bytes, int, int]]:
+) -> List[Tuple[bytes, int, int]]:
     """
     PDF bytes를 chunk_size 페이지 단위로 쪼개서
     [(chunk_pdf_bytes, start_page(1-indexed), end_page(1-indexed)), ...] 형태로 반환
@@ -382,7 +382,7 @@ def make_excel_bytes(extracted_data: dict) -> bytes:
 # ==========================================
 def process_pdf(
     file_bytes, api_url, secret_key, progress_cb: Optional[Callable] = None
-    ):
+):
     # 1) PDF를 10페이지씩 분할
     chunks = split_pdf_into_chunks(file_bytes, chunk_size=10)
 
@@ -513,13 +513,17 @@ def json_to_text_lines(ocr_json, line_y_threshold=15):
 # 3. [전처리] pdf의 카테고리 추출 함수
 # ==========================================
 def extract_pdf_category(text: str) -> str:
-    compact = re.sub(r"\s+", "", text)  # 공백/줄바꿈 제거
+    """
+    PDF 문서의 카테고리를 추출합니다.
+    """
+    if (
+        ("토지이용계획확인서" in text)
+        and ("등기사항전부증명서" in text)
+        and ("토지 대장" in text)
+    ):
 
-    if ("토지이용계획확인서" in compact) and ("등기사항전부증명서" in compact) and ("토지대장" in compact):
         return "토지이용계획확인서_토지등기_토지대장"
-
     return "기타"
-
 
 
 # ==========================================
@@ -644,81 +648,56 @@ def extract_land_document_data(text):
         include_end=False,
     )
 
-    # 갑구에서 등기목적 추출 (문자열로)
-
-
-    m_purpose = re.search(r"^\S+", land_registry_section_gabgu_last)
-    land_registry_section_gabgu_last_purpose = m_purpose.group(0) if m_purpose else ""
+    # 갑구에서 등기목적 추출
+    land_registry_section_gabgu_last_purpose = re.search(
+        r"^\S+", land_registry_section_gabgu_last
+    )
     if land_registry_section_gabgu_last_purpose:
-        data["갑구_등기목적"] = land_registry_section_gabgu_last_purpose
+        data["갑구_등기목적"] = land_registry_section_gabgu_last_purpose.group(0)
     else:
         data["갑구_등기목적"] = "찾지 못함"
 
-    # 갑구에서 접수 '제 n 호' 추출 (문자열로)
-    m_ho = re.search(r"제\s*[1-9]\d*\s*호", land_registry_section_gabgu_last)
-    land_registry_section_gabgu_last_date_1_ho = m_ho.group(0) if m_ho else ""
-
-    # 갑구에서 접수일자 추출 (등기목적 다음 첫 토큰)
-    m_date = (
-        re.search(
-            rf"{re.escape(land_registry_section_gabgu_last_purpose)}\s+(\S+)",
-            land_registry_section_gabgu_last,
-        )
-        if land_registry_section_gabgu_last_purpose
-        else None
+    # 갑구에서 접 수 추출
+    land_registry_section_gabgu_last_date_1 = slice_including_to_before(
+        land_registry_section_gabgu_last,
+        land_registry_section_gabgu_last_purpose + " ",
+        " ",
     )
-    land_registry_section_gabgu_last_date_1 = m_date.group(1) if m_date else ""
 
-    # 접수 저장
-    if (
-        land_registry_section_gabgu_last_date_1
-        and land_registry_section_gabgu_last_date_1_ho
-    ):
+    land_registry_section_gabgu_last_date_1_ho = re.search(
+        r"제\s*\d+\s*호", land_registry_section_gabgu_last
+    )
+    if land_registry_section_gabgu_last_date_1_ho:
         data["토지_등기_갑구_접수"] = (
-            f"{land_registry_section_gabgu_last_date_1} {land_registry_section_gabgu_last_date_1_ho}"
+            land_registry_section_gabgu_last_date_1
+            + " "
+            + land_registry_section_gabgu_last_date_1_ho
         )
     else:
         data["토지_등기_갑구_접수"] = "찾지 못함"
 
-    # 갑구에서 등기원인 추출 (접수일자 + 제n호 다음 토큰)
-    m_cause = (
-        re.search(
-            rf"{re.escape(land_registry_section_gabgu_last_date_1)}\s+{re.escape(land_registry_section_gabgu_last_date_1_ho)}\s+(\S+)",
-            land_registry_section_gabgu_last,
-        )
-        if (
-            land_registry_section_gabgu_last_date_1
-            and land_registry_section_gabgu_last_date_1_ho
-        )
-        else None
+    # 갑구에서 등기원인 추출
+    land_registry_section_gabgu_last_cause = slice_including_to_before(
+        land_registry_section_gabgu_last,
+        land_registry_section_gabgu_last_date_1 + " ",
+        " ",
     )
-    land_registry_section_gabgu_last_cause = m_cause.group(1) if m_cause else ""
-
     if land_registry_section_gabgu_last_cause:
-        data["토지_등기_갑구_등기원인"] = land_registry_section_gabgu_last_cause + " 매매"
+        data["토지_등기_갑구_등기원인"] = (
+            land_registry_section_gabgu_last_cause + " " + "매매"
+        )
     else:
         data["토지_등기_갑구_등기원인"] = "찾지 못함"
 
-    # 갑구에서 권리자 및 기타사항 추출: 위에서 뽑은 것들을 reference로 만들어 제거
-    ref_to_remove = " ".join(
-        [
-            x
-            for x in [
-                land_registry_section_gabgu_last_purpose,
-                land_registry_section_gabgu_last_date_1,
-                land_registry_section_gabgu_last_date_1_ho,
-                land_registry_section_gabgu_last_cause,
-                "매매",
-            ]
-            if x
-        ]
-    ).strip()
-
+    # 갑구에서 권리자 및 기타사항 추출
     ok_true_or_false_of_match_2, land_registry_section_gabgu_last_right_holder = (
         remove_reference_subsequence(
             land_registry_section_gabgu_last,
-            ref_to_remove,
-            fail_if_not_found=False,  # 일부만 제거하고 남긴 값을 쓰기 위해 False 추천
+            land_registry_section_gabgu_last_purpose
+            + land_registry_section_gabgu_last_date_1
+            + land_registry_section_gabgu_last_date_1_ho
+            + land_registry_section_gabgu_last_cause
+            + "매매",
         )
     )
 
@@ -729,31 +708,31 @@ def extract_land_document_data(text):
     else:
         data["토지_등기_갑구_권리자및기타사항"] = "찾지 못함"
 
-        # 갑구에서 소유자 찾기
-        land_registry_section_gabgu_owner = re.search(
-            r"소유자\s*([가-힣]{2,4})\s*\d{6}-\*{7}", land_registry_section_gabgu_last
-        )
-        if land_registry_section_gabgu_owner:
-            data["토지_등기_갑구_최종 소유자"] = land_registry_section_gabgu_owner.group(1)
-        else:
-            data["토지_등기_갑구_최종 소유자"] = "찾지 못함"
+    # 갑구에서 소유자 찾기
+    land_registry_section_gabgu_owner = re.search(
+        r"소유자\s*([가-힣]{2,4})\s*\d{6}-\*{7}", land_registry_section_gabgu_last
+    )
+    if land_registry_section_gabgu_owner:
+        data["토지_등기_갑구_최종 소유자"] = land_registry_section_gabgu_owner.group(1)
+    else:
+        data["토지_등기_갑구_최종 소유자"] = "찾지 못함"
 
-        # 주요 등기사항 요약에서 최종 소유자 찾기
-        land_registry_summary_section_owner = slice_including_to_before(
-            land_registry_summary_section, "순위번호", " (소유자)"
-        )
-        if land_registry_summary_section_owner:
-            data["토지_등기_요약_최종 소유자"] = land_registry_summary_section_owner.strip()
-        else:
-            data["토지_등기_요약_최종 소유자"] = "찾지 못함"
+    # 주요 등기사항 요약에서 최종 소유자 찾기
+    land_registry_summary_section_owner = slice_including_to_before(
+        land_registry_summary_section, "순위번호", " (소유자)"
+    )
+    if land_registry_summary_section_owner:
+        data["토지_등기_요약_최종 소유자"] = land_registry_summary_section_owner.strip()
+    else:
+        data["토지_등기_요약_최종 소유자"] = "찾지 못함"
 
-        # 최종 소유자 일치 여부
-        if land_registry_summary_section_owner == data["토지_등기_갑구_최종 소유자"]:
-            data["토지_등기_최종 소유자 일치 여부"] = "O"
-        else:
-            data["토지_등기_최종 소유자 일치 여부"] = "X"
+    # 최종 소유자 일치 여부
+    if land_registry_summary_section_owner == data["토지_등기_갑구_최종 소유자"]:
+        data["토지_등기_최종 소유자 일치 여부"] = "O"
+    else:
+        data["토지_등기_최종 소유자 일치 여부"] = "X"
 
-        return data
+    return data
 
 
 # main 함수
