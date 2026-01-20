@@ -1,4 +1,7 @@
 # 이 코드는 개발용 코드임
+#0.0.3version
+#토지
+
 
 import streamlit as st
 import requests
@@ -10,7 +13,7 @@ import re
 import io
 import hashlib
 
-from typing import Callable, Optional, List, Tuple
+from typing import Callable, Optional, List, Tuple, Sequence
 
 # ==========================================
 # 0 - 0. 글자 자르기 함수
@@ -124,6 +127,40 @@ def slice_from_last_start_before_end(
 
     return text[s:e]
 
+# 역주행을 하며 마지막 문자열 미포함, 첫 문자열 포함 인데, 첫 문자열은 리스트 / 튜플
+def slice_from_last_start_before_end_any(
+    text: str,
+    start_markers: list[str],   # 리스트/튜플 OK
+    end_marker: str,
+    *,
+    include_start: bool = True,
+    include_end: bool = False,
+    use_last_end: bool = True,
+    not_found: str = ""
+    ) -> str:
+    # 1) end_marker 위치
+    end_pos = text.rfind(end_marker) if use_last_end else text.find(end_marker)
+    if end_pos == -1:
+        return not_found
+
+    # 2) end_marker 앞에서 start 후보들 중 "가장 뒤에 있는 것" 선택
+    best_start_pos = -1
+    best_start_len = 0
+
+    for sm in start_markers:
+        pos = text.rfind(sm, 0, end_pos)
+        if pos > best_start_pos:
+            best_start_pos = pos
+            best_start_len = len(sm)
+
+    if best_start_pos == -1:
+        return not_found
+
+    # 3) 포함/미포함 적용
+    s = best_start_pos if include_start else best_start_pos + best_start_len
+    e = end_pos + len(end_marker) if include_end else end_pos
+    return text[s:e]
+
 # 역주행을 하며 마지막 문자열 미포함, 첫 문자열 포함 인데 정규표현식 사용
 def slice_from_last_start_before_end_regex(
     text: str,
@@ -189,7 +226,7 @@ def slice_after_start_to_including_end_reverse(
     # 3) 구간 반환
     return text[start_end:end_end]
 
-# 기준 문자열과 같은 문자들만 추출
+# 기준 문자열과 같은 단어들만 추출
 def _normalize_token(tok: str) -> str:
     """
     OCR 흔들림을 조금 견디게 토큰 정규화.
@@ -201,7 +238,6 @@ def _normalize_token(tok: str) -> str:
     # 토큰 양끝의 불필요한 문장부호 제거 (하이픈은 유지해야 하므로 제외)
     tok = re.sub(r"^[\s,.:;(){}\[\]<>\"'`]+|[\s,.:;(){}\[\]<>\"'`]+$", "", tok)
     return tok
-
 def extract_reference_subsequence(
     source: str,
     reference: str,
@@ -244,6 +280,44 @@ def extract_reference_subsequence(
         return True, result
 
     return True, result
+
+#기준 문자열과 다른 단어들만 추출
+def remove_reference_subsequence(
+    source: str,
+    reference: str,
+    *,
+    fail_if_not_found: bool = True
+    ) -> Tuple[bool, str]:
+    """
+    source에서 reference 토큰들을 '순서대로' 매칭해 제거하고,
+    남은 토큰들을 공백으로 합쳐 반환.
+
+    - fail_if_not_found=True이면 reference 토큰을 전부 못 찾으면 실패 처리
+    - False이면 찾은 것만 제거하고 남은 것 반환
+    """
+    source_clean = re.sub(r"\s+", " ", source).strip()
+    ref_clean = re.sub(r"\s+", " ", reference).strip()
+
+    source_tokens: List[str] = [_normalize_token(t) for t in source_clean.split(" ") if _normalize_token(t)]
+    ref_tokens: List[str] = [_normalize_token(t) for t in ref_clean.split(" ") if _normalize_token(t)]
+
+    if not ref_tokens:
+        return False, "reference가 비어있음"
+
+    kept = []
+    j = 0  # ref_tokens 포인터
+
+    for tok in source_tokens:
+        if j < len(ref_tokens) and tok == ref_tokens[j]:
+            # 매칭된 reference 토큰은 제거(keep 안 함)
+            j += 1
+        else:
+            kept.append(tok)
+
+    if fail_if_not_found and j != len(ref_tokens):
+        return False, f"reference 토큰을 전부 찾지 못함 (진행 {j}/{len(ref_tokens)})"
+
+    return True, " ".join(kept)
 
 
 # ==========================================
@@ -461,6 +535,8 @@ def extract_land_document_data(text):
     land_use_plan_section = slice_between(text, "문서확인번호", "등기사항전부증명서")
     #등기사항전부증명서
     land_registry_section = slice_between(text, "등기사항전부증명서", "토지 대장")
+    #주요 등기사항 요약
+    land_registry_summary_section = slice_between(text, "주요 등기사항 요약", "토지 대장")
     #토지 대장
     land_register_section = slice_between(text, "토지 대장", "문서확인번호")
 
@@ -478,25 +554,15 @@ def extract_land_document_data(text):
     section_for_header_1 = slice_from_last_start_before_end_regex(land_registry_section,
                                                                 r"\n\d\s", "갑 구")
     
-    #면적 추출
+    #면적 구하기
     m2 = re.search(r"(\d+(?:,\d+)*(?:\.\d+)?)\s*m2", section_for_header_1, re.I)
     land_area_in_registry = (m2.group(1).replace(",", "") + "m2") if m2 else ""
 
 
-    if land_area_in_registry:
-        data["면적(토지)"] = land_area_in_registry
-    else:
-        data["면적(토지)"] = "찾지 못함"
-    
     #지목 추출
-    
     m = re.search(r"([가-힣]+)\s*\d+(?:,\d+)*(?:\.\d+)?\s*m2", section_for_header_1, re.I)
     land_category_in_registry = m.group(1) if m else ""
-    if land_category_in_registry:
-        data["지목(토지)"] = land_category_in_registry
-    else:
-        data["지목(토지)"] = "찾지 못함"
-        
+       
     #소재 지번 추출
     true_or_false_of_match_1, land_address_in_registry_2 = extract_reference_subsequence(section_for_header_1,
                                                                                          land_address_in_registry_1)
@@ -504,15 +570,114 @@ def extract_land_document_data(text):
         data["소재지번(토지)"] = land_address_in_registry_2
     else:
         data["소재지번(토지)"] = "찾지 못함"
-
+    #토지 & 소재지번 매칭 여부    
     if true_or_false_of_match_1 == False:
         data["토지 & 소재지번 매칭 여부"] = "X"
     else:
         data["토지 & 소재지번 매칭 여부"] = "O"
         
+    # 지목 추출    
+    if land_category_in_registry:
+        data["지목(토지)"] = land_category_in_registry
+    else:
+        data["지목(토지)"] = "찾지 못함"    
+    
+    # 면적 추출   
+    if land_area_in_registry:
+        data["면적(토지)"] = land_area_in_registry
+    else:
+        data["면적(토지)"] = "찾지 못함"
         
-    return data
+    #-------------------------------------
+    # 갑 구 (소유권에 관한 사항)   
+    #-------------------------------------
+    land_registry_section_gabgu = slice_between(land_registry_section, "갑 구", "을 구")
+    
+    # 갑구에서 마지막 칸 떼어내기
+    land_registry_section_gabgu_last = slice_from_last_start_before_end(
+        land_registry_section_gabgu,
+        start_markers=["공유자전원지분전부" #이전
+                       , "소유권보존", "소유권이전", "소유권일부이전", "소유권경정", 
+                       "소유권변경", "가압류", "압류", "가처분", "강제경매개시결정",
+                       "임의경매개시결정", "공매공고", "소유권이전청구권가" #등기
+                       , "가등기", "담보가등기", "신탁", "환매특약",
+                       "등기명의인표시변경", "말소", "말소회복", "멸실"],
+        end_marker="을 구",
+        include_start=True,
+        include_end=False,
+    )
+    
+    # 갑구에서 등기목적 추출
+    land_registery_section_gabgu_last_purpose = re.search(r"^\S+", land_registery_section_gabgu_last)
+    if land_registery_section_gabgu_last_purpose:
+        data["갑구_등기목적"] = land_registery_section_gabgu_last_purpose.group(0)
+    else:
+        data["갑구_등기목적"] = "찾지 못함"
+        
+    # 갑구에서 접 수 추출
+    land_registery_section_gabgu_last_date_1 = slice_including_to_before(
+        land_registery_section_gabgu_last,
+        "land_registery_section_gabgu_last_purpose" + " ",
+        " ",
+        )
+    
+    land_registery_section_gabgu_last_date_1_ho = re.search(r"제\s*\d+\s*호",
+                                                        land_registery_section_gabgu_last)
+    if land_registery_section_gabgu_last_date_1_ho:
+        data["토지_등기_갑구_접수"] = land_registery_section_gabgu_last_date_1 + " " + land_registery_section_gabgu_last_date_1_ho
+    else:
+        data["토지_등기_갑구_접수"] = "찾지 못함"
 
+
+    # 갑구에서 등기원인 추출
+    land_registery_section_gabgu_last_cause = slice_including_to_before(
+        land_registery_section_gabgu_last,
+        land_registery_section_gabgu_last_date_1 + " ",
+        " ",
+        )
+    if land_registery_section_gabgu_last_cause:
+        data["토지_등기_갑구_등기원인"] = land_registery_section_gabgu_last_cause + " " + "매매"
+    else:
+        data["토지_등기_갑구_등기원인"] = "찾지 못함"
+        
+    # 갑구에서 권리자 및 기타사항 추출
+    ok_true_or_false_of_match_2, land_registry_section_gabgu_last_right_holder = remove_reference_subsequence(
+        land_registery_section_gabgu_last,
+        land_registery_section_gabgu_last_purpose + land_registery_section_gabgu_last_date_1 + 
+        land_registery_section_gabgu_last_date_1_ho + land_registery_section_gabgu_last_cause + "매매"
+    )
+    
+    if ok_true_or_false_of_match_2:
+        data["토지_등기_갑구_권리자및기타사항"] = land_registry_section_gabgu_last_right_holder.strip()
+    else:
+        data["토지_등기_갑구_권리자및기타사항"] = "찾지 못함"
+        
+    # 갑구에서 소유자 찾기
+    land_registry_section_gabgu_owner = re.search(r"소유자\s*([가-힣]{2,4})\s*\d{6}-\*{7}", land_registry_section_gabgu_last)
+    if land_registry_section_gabgu_owner:
+        data["토지_등기_갑구_최종 소유자"] = land_registry_section_gabgu_owner.group(1)
+    else:
+        data["토지_등기_갑구_최종 소유자"] = "찾지 못함"
+
+    # 주요 등기사항 요약에서 최종 소유자 찾기
+    land_registry_summary_section_owner = slice_including_to_before(
+        land_registry_summary_section,
+        "순위번호",
+        " (소유자)"
+    )
+    if land_registry_summary_section_owner:
+        data["토지_등기_요약_최종 소유자"] = land_registry_summary_section_owner.strip()
+    else:
+        data["토지_등기_요약_최종 소유자"] = "찾지 못함"
+    
+    # 최종 소유자 일치 여부
+    if land_registry_summary_section_owner == data["토지_등기_갑구_최종 소유자"]:
+        data["토지_등기_최종 소유자 일치 여부"] = "O"
+    else:
+        data["토지_등기_최종 소유자 일치 여부"] = "X"
+
+    return data
+ 
 
 # main 함수
 def main():
