@@ -586,7 +586,7 @@ def extract_land_document_data(text):
     # 주요 등기사항 요약
     land_registry_summary_section = slice_between(text, "주요 등기사항 요약", "토지 대장")
     # 토지 대장
-    land_registry_section = slice_between(text, "토지 대장", "문서확인번호")
+    land_register_section = slice_between(text, "토지 대장", "문서확인번호")
 
     # === 표제부에서 필요한 정보 추출 ===
     # [토지] 추출
@@ -676,6 +676,11 @@ def extract_land_document_data(text):
 
     if land_registry_section_gabgu_last_date_1_ho:
         ho_str = land_registry_section_gabgu_last_date_1_ho.group(0)   # ✅ 문자열
+        land_registry_section_gabgu_last_date_1_ho = (
+            land_registry_section_gabgu_last_date_1_ho.group(0)
+            if land_registry_section_gabgu_last_date_1_ho
+            else ""
+        )
         date_str = land_registry_section_gabgu_last_date_1 or ""        # ✅ None 방지
 
         if date_str:
