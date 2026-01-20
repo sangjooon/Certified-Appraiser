@@ -93,6 +93,38 @@ def slice_including_to_before(
 
     return text[s:e]
 
+# 첫 문자열 포함 마지막 문자열 포함
+def slice_include_start_include_end(
+    text: str,
+    start: str,
+    end: Optional[str] = None,
+    *,
+    flags: int = 0
+    ) -> str:
+    """
+    text에서 start(포함) ~ end(포함) 구간을 반환.
+    - end가 None이면 start부터 끝까지 반환
+    - start를 못 찾으면 "" 반환
+    - end를 못 찾으면 start부터 끝까지 반환
+    """
+    m1 = re.search(re.escape(start), text, flags)
+    if not m1:
+        return ""
+
+    s = m1.start()  # start 포함
+
+    if end is None:
+        return text[s:]
+
+    # start 이후에서 end 찾기
+    m2 = re.search(re.escape(end), text[m1.end():], flags)
+    if not m2:
+        return text[s:]
+
+    # end 포함하려면 end의 끝까지
+    e = m1.end() + m2.end()
+    return text[s:e]
+
 
 # 역주행을 하며 마지막 문자열 미포함, 첫 문자열 포함
 def slice_from_last_start_before_end(
@@ -609,7 +641,7 @@ def extract_land_document_data(text):
     # -------------------------------------
     # 갑 구 (소유권에 관한 사항)
     # -------------------------------------
-    land_registry_section_gabgu = slice_between(land_registry_section, "갑 구", "을 구")
+    land_registry_section_gabgu = slice_include_start_include_end(land_registry_section, "갑 구", "을 구")
 
     # 갑구에서 마지막 칸 떼어내기
     land_registry_section_gabgu_last = slice_from_last_start_before_end_regex(
@@ -640,15 +672,16 @@ def extract_land_document_data(text):
     )
 
     # 접수의 호 추출
-    land_registry_section_gabgu_last_date_1_ho = re.search(
-        r"제\s*\d+\s*호", land_registry_section_gabgu_last
-    )
+    land_registry_section_gabgu_last_date_1_ho = re.search(r"제\s*\d+\s*호", land_registry_section_gabgu_last)
+
     if land_registry_section_gabgu_last_date_1_ho:
-        data["토지_등기_갑구_접수"] = (
-            land_registry_section_gabgu_last_date_1
-            + " "
-            + land_registry_section_gabgu_last_date_1_ho
-        )
+        ho_str = land_registry_section_gabgu_last_date_1_ho.group(0)   # ✅ 문자열
+        date_str = land_registry_section_gabgu_last_date_1 or ""        # ✅ None 방지
+
+        if date_str:
+            data["토지_등기_갑구_접수"] = date_str + " " + ho_str
+        else:
+            data["토지_등기_갑구_접수"] = ho_str  # 날짜 못 찾으면 호만이라도
     else:
         data["토지_등기_갑구_접수"] = "찾지 못함"
 
