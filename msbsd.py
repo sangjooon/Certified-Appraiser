@@ -513,17 +513,13 @@ def json_to_text_lines(ocr_json, line_y_threshold=15):
 # 3. [전처리] pdf의 카테고리 추출 함수
 # ==========================================
 def extract_pdf_category(text: str) -> str:
-    """
-    PDF 문서의 카테고리를 추출합니다.
-    """
-    if (
-        ("토지이용계획확인서" in text)
-        and ("등기사항전부증명서" in text)
-        and ("토지 대장" in text)
-    ):
+    compact = re.sub(r"\s+", "", text)  # 공백/줄바꿈 제거
 
+    if ("토지이용계획확인서" in compact) and ("등기사항전부증명서" in compact) and ("토지대장" in compact):
         return "토지이용계획확인서_토지등기_토지대장"
+
     return "기타"
+
 
 
 # ==========================================
