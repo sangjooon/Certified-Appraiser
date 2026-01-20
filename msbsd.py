@@ -594,7 +594,7 @@ def extract_land_document_data(text):
     land_registry_section_gabgu = slice_between(land_registry_section, "갑 구", "을 구")
     
     # 갑구에서 마지막 칸 떼어내기
-    land_registry_section_gabgu_last = slice_from_last_start_before_end(
+    land_registry_section_gabgu_last = slice_from_last_start_before_end_any(
         land_registry_section_gabgu,
         start_markers=["공유자전원지분전부" #이전
                        , "소유권보존", "소유권이전", "소유권일부이전", "소유권경정", 
