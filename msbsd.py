@@ -552,11 +552,9 @@ def extract_land_document_data(text):
     # 등기사항전부증명서
     land_registry_section = slice_between(text, "등기사항전부증명서", "토지 대장")
     # 주요 등기사항 요약
-    land_registry_summary_section = slice_between(
-        text, "주요 등기사항 요약", "토지 대장"
-    )
+    land_registry_summary_section = slice_between(text, "주요 등기사항 요약", "토지 대장")
     # 토지 대장
-    land_register_section = slice_between(text, "토지 대장", "문서확인번호")
+    land_registry_section = slice_between(text, "토지 대장", "문서확인번호")
 
     # === 표제부에서 필요한 정보 추출 ===
     # [토지] 추출
@@ -649,21 +647,30 @@ def extract_land_document_data(text):
     )
 
     # 갑구에서 등기목적 추출
-    land_registry_section_gabgu_last_purpose = re.search(
+    land_registry_section_gabgu_last_purpose_regex = re.search(
         r"^\S+", land_registry_section_gabgu_last
     )
+    if land_registry_section_gabgu_last_purpose_regex:
+        land_registry_section_gabgu_last_purpose = (
+            land_registry_section_gabgu_last_purpose_regex.group(0)
+        )
+    else:
+        land_registry_section_gabgu_last_purpose = ""
+    
     if land_registry_section_gabgu_last_purpose:
-        data["갑구_등기목적"] = land_registry_section_gabgu_last_purpose.group(0)
+        data["갑구_등기목적"] = land_registry_section_gabgu_last_purpose
     else:
         data["갑구_등기목적"] = "찾지 못함"
 
-    # 갑구에서 접 수 추출
+    # 갑 구에서 접 수 추출
     land_registry_section_gabgu_last_date_1 = slice_including_to_before(
         land_registry_section_gabgu_last,
         land_registry_section_gabgu_last_purpose + " ",
         " ",
     )
 
+    # 접수의 호 추출
+    
     land_registry_section_gabgu_last_date_1_ho = re.search(
         r"제\s*\d+\s*호", land_registry_section_gabgu_last
     )
@@ -749,7 +756,7 @@ def main():
     st.title("문서 비서📄 dev")
 
     # 개발 단계
-    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.2")
+    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.3")
 
     # 서비스 설명
     st.markdown(
