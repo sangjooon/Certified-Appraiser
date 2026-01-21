@@ -649,22 +649,17 @@ def extract_land_document_data(text):
     )
 
     # 갑구에서 등기목적 추출
-    land_registry_section_gabgu_last_purpose_regex = re.search(
-        r"^\S+", land_registry_section_gabgu_last
+    land_registery_section_gabgu_last_purpose = slice_including_to_before(
+        land_registry_section_gabgu_last, " ", " "
     )
-    if land_registry_section_gabgu_last_purpose_regex:
-        land_registry_section_gabgu_last_purpose = (
-            land_registry_section_gabgu_last_purpose_regex.group(0)
-        )
-    else:
-        land_registry_section_gabgu_last_purpose = ""
     
-    if land_registry_section_gabgu_last_purpose:
-        data["갑구_등기목적"] = land_registry_section_gabgu_last_purpose
+    if land_registery_section_gabgu_last_purpose:
+        data["토지_등기_갑구_등기목적"] = land_registery_section_gabgu_last_purpose.strip()
     else:
-        data["갑구_등기목적"] = "찾지 못함"
+        data["토지_등기_갑구_등기목적"] = "찾지 못함"
+    
 
-    # 갑 구에서 접 수 추출
+    # 갑구에서 접수일자 추출
     land_registry_section_gabgu_last_date_1 = slice_including_to_before(
         land_registry_section_gabgu_last,
         land_registry_section_gabgu_last_purpose + " ",
@@ -672,21 +667,18 @@ def extract_land_document_data(text):
     )
 
     # 접수의 호 추출
-    land_registry_section_gabgu_last_date_1_ho = re.search(r"제\s*\d+\s*호", land_registry_section_gabgu_last)
+    section_for_standard_1 = slice_between(
+        land_registry_section_gabgu_last, land_registry_section_gabgu_last_date_1, "\n")
+    land_registry_section_gabgu_last_date_1_ho = slice_including_to_before(
+        land_registry_section_gabgu_last, section_for_standard_1 + "\n", " "
+    )
+    
+    # 접수일자 + 호 합치기
+    land_registry_section_gabgu_last_jupsu = land_registry_section_gabgu_last_date_1 
+    + " " + land_registry_section_gabgu_last_date_1_ho
 
-    if land_registry_section_gabgu_last_date_1_ho:
-        ho_str = land_registry_section_gabgu_last_date_1_ho.group(0)   # ✅ 문자열
-        land_registry_section_gabgu_last_date_1_ho = (
-            land_registry_section_gabgu_last_date_1_ho.group(0)
-            if land_registry_section_gabgu_last_date_1_ho
-            else ""
-        )
-        date_str = land_registry_section_gabgu_last_date_1 or ""        # ✅ None 방지
-
-        if date_str:
-            data["토지_등기_갑구_접수"] = date_str + " " + ho_str
-        else:
-            data["토지_등기_갑구_접수"] = ho_str  # 날짜 못 찾으면 호만이라도
+    if land_registry_section_gabgu_last_jupsu:
+        data["토지_등기_갑구_접수"] = land_registry_section_gabgu_last_jupsu.strip()
     else:
         data["토지_등기_갑구_접수"] = "찾지 못함"
 
