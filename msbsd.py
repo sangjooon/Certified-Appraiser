@@ -674,8 +674,10 @@ def extract_land_document_data(text):
     )
     
     # 접수일자 + 호 합치기
-    land_registry_section_gabgu_last_jupsu = land_registry_section_gabgu_last_date_1 
-    + " " + land_registry_section_gabgu_last_date_1_ho
+    land_registry_section_gabgu_last_jupsu = (
+        land_registry_section_gabgu_last_date_1 
+        + " " + land_registry_section_gabgu_last_date_1_ho
+    )
 
     if land_registry_section_gabgu_last_jupsu:
         data["토지_등기_갑구_접수"] = land_registry_section_gabgu_last_jupsu.strip()
