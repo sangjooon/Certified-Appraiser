@@ -649,12 +649,12 @@ def extract_land_document_data(text):
     )
 
     # 갑구에서 등기목적 추출
-    land_registery_section_gabgu_last_purpose = slice_including_to_before(
+    land_registry_section_gabgu_last_purpose = slice_including_to_before(
         land_registry_section_gabgu_last, " ", " "
     )
-    
-    if land_registery_section_gabgu_last_purpose:
-        data["토지_등기_갑구_등기목적"] = land_registery_section_gabgu_last_purpose.strip()
+
+    if land_registry_section_gabgu_last_purpose:
+        data["토지_등기_갑구_등기목적"] = land_registry_section_gabgu_last_purpose.strip()
     else:
         data["토지_등기_갑구_등기목적"] = "찾지 못함"
     
