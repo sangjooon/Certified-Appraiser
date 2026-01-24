@@ -1,5 +1,5 @@
 # 이 코드는 개발용 코드임
-# 0.0.3version
+# 0.0.4version
 # 토지
 
 
@@ -52,7 +52,7 @@ def slice_between(
     return text[s:e]
 
 
-# 첫 문자열 미포함 마지막 문자열 미포함
+# 첫 문자열 포함 마지막 문자열 미포함
 def slice_including_to_before(
     text: str,
     start: str,
@@ -124,6 +124,63 @@ def slice_include_start_include_end(
     # end 포함하려면 end의 끝까지
     e = m1.end() + m2.end()
     return text[s:e]
+
+#첫 문자열 포함 or 미포함, 마지막 문자열 포함 or 미포함 함수
+def slice_between_occurrences(
+    text: str,
+    start: str,
+    end: Optional[str],
+    *,
+    start_occurrence: int = 1,
+    end_occurrence: int = 1,
+    include_start: bool = True,
+    include_end: bool = False,
+    not_found: str = "",
+    ) -> str:
+    """
+    text에서 start ~ end 구간을 잘라 반환 (occurrence 지원).
+
+    - start_occurrence: start가 여러 번 나오면 몇 번째 start를 기준으로 할지 (1=첫 번째)
+    - end_occurrence: start "이후"에 나오는 end 중 몇 번째 end를 기준으로 할지 (1=첫 번째)
+    - include_start/include_end: 경계 문자열 포함 여부
+    - end가 None이면 start 기준으로 끝까지
+    - start를 못 찾으면 not_found 반환
+    - end를 못 찾으면 start부터 끝까지 반환(기존 동작 유지)
+    """
+
+    if start_occurrence < 1 or end_occurrence < 1:
+        raise ValueError("start_occurrence와 end_occurrence는 1 이상의 정수여야 합니다.")
+
+    # 1) start 찾기 (n번째 occurrence)
+    s = -1
+    pos = 0
+    for _ in range(start_occurrence):
+        s = text.find(start, pos)
+        if s == -1:
+            return not_found
+        pos = s + len(start)  # 다음 start 탐색은 이 뒤부터
+
+    # start 포함/미포함 적용
+    start_idx = s if include_start else s + len(start)
+
+    # 2) end가 None이면 start 기준으로 끝까지
+    if end is None:
+        return text[start_idx:]
+
+    # 3) end 찾기 (start 뒤에서 n번째 occurrence)
+    e = -1
+    search_pos = pos  # start 다음 위치부터 탐색
+    for _ in range(end_occurrence):
+        e = text.find(end, search_pos)
+        if e == -1:
+            # end가 없으면 start부터 끝까지
+            return text[start_idx:]
+        search_pos = e + len(end)
+
+    # end 포함/미포함 적용
+    end_idx = e + len(end) if include_end else e
+
+    return text[start_idx:end_idx]
 
 
 # 역주행을 하며 마지막 문자열 미포함, 첫 문자열 포함
@@ -660,19 +717,30 @@ def extract_land_document_data(text):
     
 
     # 갑구에서 접수일자 추출
-    land_registry_section_gabgu_last_date_1 = slice_including_to_before(
+    land_registry_section_gabgu_last_date_1 = slice_between_occurrences(
         land_registry_section_gabgu_last,
         land_registry_section_gabgu_last_purpose + " ",
         " ",
+        start_occurrence=False,
+        end_occurrence=False,
+    )
+
+    # 접수의 호 추출 하기위한 특수 범위 설정
+    section_for_standard_1 = slice_between_occurrences(
+        land_registry_section_gabgu_last, land_registry_section_gabgu_last_date_1, "\n",
+        start_occurrence=False,
+        end_occurrence=False,
     )
 
     # 접수의 호 추출
-    section_for_standard_1 = slice_between(
-        land_registry_section_gabgu_last, land_registry_section_gabgu_last_date_1, "\n")
-    land_registry_section_gabgu_last_date_1_ho = slice_including_to_before(
-        land_registry_section_gabgu_last, section_for_standard_1 + "\n", " "
+    land_registry_section_gabgu_last_date_1_ho = slice_between_occurrences(
+        land_registry_section_gabgu_last,
+        section_for_standard_1 + "\n",
+        " ",
+        start_occurrence=False,
+        end_occurrence=False,
     )
-    
+
     # 접수일자 + 호 합치기
     land_registry_section_gabgu_last_jupsu = (
         land_registry_section_gabgu_last_date_1 
@@ -757,7 +825,7 @@ def main():
     st.title("문서 비서📄 dev")
 
     # 개발 단계
-    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.3")
+    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.4")
 
     # 서비스 설명
     st.markdown(
