@@ -753,11 +753,14 @@ def extract_land_document_data(text):
         data["토지_등기_갑구_접수"] = "찾지 못함"
 
     # 갑구에서 등기원인 추출
-    land_registry_section_gabgu_last_cause = slice_including_to_before(
-        land_registry_section_gabgu_last,
-        land_registry_section_gabgu_last_date_1 + " ",
-        " ",
+    land_registry_section_gabgu_last_cause = slice_between_occurrences(
+        land_registry_section_gabgu_last, land_registry_section_gabgu_last_date_1 + " ", " ", 
+        include_start=False,
+        include_end=False,
     )
+    
+    
+    
     if land_registry_section_gabgu_last_cause:
         data["토지_등기_갑구_등기원인"] = (
             land_registry_section_gabgu_last_cause + " " + "매매"
