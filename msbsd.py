@@ -806,8 +806,10 @@ def extract_land_document_data(text):
         data["토지_등기_갑구_최종 소유자"] = "찾지 못함"
 
     # 주요 등기사항 요약에서 최종 소유자 찾기
-    land_registry_summary_section_owner = slice_including_to_before(
-        land_registry_summary_section, "순위번호", " (소유자)"
+    land_registry_summary_section_owner = slice_between_occurrences(
+        land_registry_summary_section, "순위번호", " (소유자)",
+        include_start=False,
+        include_end=False,
     )
     if land_registry_summary_section_owner:
         data["토지_등기_요약_최종 소유자"] = land_registry_summary_section_owner.strip()
