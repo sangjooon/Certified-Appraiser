@@ -817,10 +817,14 @@ def extract_land_document_data(text):
         data["토지_등기_요약_최종 소유자"] = "찾지 못함"
 
     # 최종 소유자 일치 여부
-    if land_registry_summary_section_owner == data["토지_등기_갑구_최종 소유자"]:
+    gabgu_owner = (data["토지_등기_갑구_최종 소유자"] or "").strip()
+    summary_owner = (land_registry_summary_section_owner or "").strip()
+
+    if summary_owner == gabgu_owner:
         data["토지_등기_최종 소유자 일치 여부"] = "O"
     else:
         data["토지_등기_최종 소유자 일치 여부"] = "X"
+
 
     return data
 
