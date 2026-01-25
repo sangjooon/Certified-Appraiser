@@ -721,15 +721,15 @@ def extract_land_document_data(text):
         land_registry_section_gabgu_last,
         land_registry_section_gabgu_last_purpose + " ",
         " ",
-        start_occurrence=False,
-        end_occurrence=False,
+        include_start=False,
+        include_end=False,
     )
 
     # 접수의 호 추출 하기위한 특수 범위 설정
     section_for_standard_1 = slice_between_occurrences(
         land_registry_section_gabgu_last, land_registry_section_gabgu_last_date_1, "\n",
-        start_occurrence=False,
-        end_occurrence=False,
+        include_start=False,
+        include_end=False,
     )
 
     # 접수의 호 추출
@@ -737,8 +737,8 @@ def extract_land_document_data(text):
         land_registry_section_gabgu_last,
         section_for_standard_1 + "\n",
         " ",
-        start_occurrence=False,
-        end_occurrence=False,
+        include_start=False,
+        include_end=False,
     )
 
     # 접수일자 + 호 합치기
