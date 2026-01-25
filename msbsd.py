@@ -769,23 +769,24 @@ def extract_land_document_data(text):
         data["토지_등기_갑구_등기원인"] = "찾지 못함"
 
     # 갑구에서 권리자 및 기타사항 추출
-    ok_true_or_false_of_match_2, land_registry_section_gabgu_last_right_holder = (
-        remove_reference_subsequence(
-            source = land_registry_section_gabgu_last,
-            reference = land_registry_section_gabgu_last_purpose
-            + land_registry_section_gabgu_last_date_1
-            + land_registry_section_gabgu_last_date_1_ho
-            + land_registry_section_gabgu_last_cause
-            + "매매",
-        )
+    reference = " ".join(
+        s.strip() for s in [
+            land_registry_section_gabgu_last_purpose,
+            land_registry_section_gabgu_last_jupsu,
+            land_registry_section_gabgu_last_cause,
+            "매매",
+        ]
+        if s and s.strip()
     )
 
-    if ok_true_or_false_of_match_2:
-        data["토지_등기_갑구_권리자및기타사항"] = (
-            land_registry_section_gabgu_last_right_holder.strip()
-        )
-    else:
-        data["토지_등기_갑구_권리자및기타사항"] = "찾지 못함"
+    ok, right_holder = remove_reference_subsequence(
+        source=land_registry_section_gabgu_last,
+        reference=reference,
+        fail_if_not_found=False,  # 실무에선 이게 더 안전한 경우가 많음
+    )
+
+    data["토지_등기_갑구_권리자및기타사항"] = right_holder.strip() if ok else "찾지 못함"
+
 
     # 갑구에서 소유자 찾기
     land_registry_section_gabgu_owner = re.search(
