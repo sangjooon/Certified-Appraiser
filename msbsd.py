@@ -771,8 +771,8 @@ def extract_land_document_data(text):
     # 갑구에서 권리자 및 기타사항 추출
     ok_true_or_false_of_match_2, land_registry_section_gabgu_last_right_holder = (
         remove_reference_subsequence(
-            land_registry_section_gabgu_last,
-            land_registry_section_gabgu_last_purpose
+            source = land_registry_section_gabgu_last,
+            reference = land_registry_section_gabgu_last_purpose
             + land_registry_section_gabgu_last_date_1
             + land_registry_section_gabgu_last_date_1_ho
             + land_registry_section_gabgu_last_cause
