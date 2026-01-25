@@ -759,8 +759,7 @@ def extract_land_document_data(text):
         include_end=False,
     )
     
-    
-    
+
     if land_registry_section_gabgu_last_cause:
         data["토지_등기_갑구_등기원인"] = (
             land_registry_section_gabgu_last_cause + " " + "매매"
@@ -768,12 +767,21 @@ def extract_land_document_data(text):
     else:
         data["토지_등기_갑구_등기원인"] = "찾지 못함"
 
+
     # 갑구에서 권리자 및 기타사항 추출
+    land_registry_section_gabgu_last = slice_between_occurrences(
+        land_registry_section_gabgu_last, " ", None,
+        include_start=False,
+        include_end=True,)
+        
+    
+    
     reference = " ".join(
         s.strip() for s in [
             land_registry_section_gabgu_last_purpose,
-            land_registry_section_gabgu_last_jupsu,
+            land_registry_section_gabgu_last_date_1,
             land_registry_section_gabgu_last_cause,
+            land_registry_section_gabgu_last_date_1_ho,
             "매매",
         ]
         if s and s.strip()
