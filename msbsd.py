@@ -1,6 +1,7 @@
 # 이 코드는 개발용 코드임
-# 0.0.4version
-# 토지
+# 0.0.5version (전 버전의 코드를 깔끔하게 수정)
+# 토지 & 건물 이용계획서, 등기, 대장 문서에서 소재지번, 지목, 면적, 소유자 등 핵심 정보 추출
+
 
 
 import streamlit as st
@@ -15,117 +16,9 @@ import hashlib
 
 from typing import Callable, Optional, List, Tuple, Sequence
 
-
-# ==========================================
-# 0 - 0. 글자 자르기 함수
-# ==========================================
-# 첫 문자열 포함 마지막 문자열 미포함
-def slice_between(
-    text: str,
-    start: str,
-    end: Optional[str] = None,
-    *,
-    include_start: bool = True,
-    include_end: bool = False,
-    flags: int = 0,
-    ) -> str:
-    """
-    text에서 start ~ end 구간을 잘라 반환.
-    - end가 None이면 start부터 끝까지
-    - include_start/include_end로 경계 포함 여부 제어
-    """
-    m1 = re.search(re.escape(start), text, flags)
-    if not m1:
-        return ""
-
-    s = m1.start() if include_start else m1.end()
-
-    if end is None:
-        return text[s:]
-
-    m2 = re.search(re.escape(end), text[m1.end() :], flags)
-    if not m2:
-        # end가 없으면 start부터 끝까지
-        return text[s:]
-
-    e = (m1.end() + m2.end()) if include_end else (m1.end() + m2.start())
-    return text[s:e]
-
-
-# 첫 문자열 포함 마지막 문자열 미포함
-def slice_including_to_before(
-    text: str,
-    start: str,
-    end: Optional[str],
-    *,
-    start_occurrence: int = 1,
-    end_occurrence: int = 1,
-    not_found: str = "",
-    ) -> str:
-    """
-    text에서 start(포함) ~ end(직전) 구간 반환.
-    - start_occurrence: start가 여러 번 나오면 몇 번째 것을 기준으로 할지 (1=첫 번째)
-    - end_occurrence: end가 여러 번 나오면 몇 번째 것을 기준으로 할지 (1=첫 번째)
-    - end가 None이면 start부터 끝까지
-    - start를 못 찾으면 not_found 반환
-    """
-    # start 찾기 (n번째 occurrence)
-    s = -1
-    pos = 0
-    for _ in range(start_occurrence):
-        s = text.find(start, pos)
-        if s == -1:
-            return not_found
-        pos = s + len(start)
-
-    if end is None:
-        return text[s:]
-
-    # end 찾기 (start 뒤에서 n번째 occurrence)
-    e = -1
-    pos = pos  # start 다음 위치부터 탐색
-    for _ in range(end_occurrence):
-        e = text.find(end, pos)
-        if e == -1:
-            # end가 없으면 start부터 끝까지로 처리
-            return text[s:]
-        pos = e + len(end)
-
-    return text[s:e]
-
-# 첫 문자열 포함 마지막 문자열 포함
-def slice_include_start_include_end(
-    text: str,
-    start: str,
-    end: Optional[str] = None,
-    *,
-    flags: int = 0
-    ) -> str:
-    """
-    text에서 start(포함) ~ end(포함) 구간을 반환.
-    - end가 None이면 start부터 끝까지 반환
-    - start를 못 찾으면 "" 반환
-    - end를 못 찾으면 start부터 끝까지 반환
-    """
-    m1 = re.search(re.escape(start), text, flags)
-    if not m1:
-        return ""
-
-    s = m1.start()  # start 포함
-
-    if end is None:
-        return text[s:]
-
-    # start 이후에서 end 찾기
-    m2 = re.search(re.escape(end), text[m1.end():], flags)
-    if not m2:
-        return text[s:]
-
-    # end 포함하려면 end의 끝까지
-    e = m1.end() + m2.end()
-    return text[s:e]
-
-#첫 문자열 포함 or 미포함, 마지막 문자열 포함 or 미포함 함수
+#=========================================  
+#첫 문자열 포함 or 미포함, 마지막 문자열 포함 or 미포함
+# n번째 등장하는 문자열 기준으로 자르기
 def slice_between_occurrences(
     text: str,
     start: str,
@@ -609,9 +502,11 @@ def extract_pdf_category(text: str) -> str:
         ("토지이용계획확인서" in text)
         and ("등기사항전부증명서" in text)
         and ("토지 대장" in text)
+        and ("일반건축물대장" in text or "집합건축물대장" in text)
+        
     ):
 
-        return "토지이용계획확인서_토지등기_토지대장"
+        return "토지이용계획확인서_토지등기_토지대장_건물"
     return "기타"
 
 
@@ -622,32 +517,53 @@ def extract_data_by_rules(text, pdf_category):
     """
     텍스트 덩어리에서 정규표현식(Regex)을 이용해 핵심 데이터를 추출합니다.
     """
-    if pdf_category == "토지이용계획확인서_토지등기_토지대장":
-        return extract_land_document_data(text)
+    if pdf_category == "토지이용계획확인서_토지등기_토지대장_건물":
+        return extract_land_building_document_data(text)
 
 
 # ==========================================
-# 4 - 1. 토지이용계획확인서_토지등기_토지대장 문서용 데이터 추출 함수
+# 4 - 1. 토지이용계획확인서_토지등기_토지대장_건물 문서용 데이터 추출 함수
 # ==========================================
-def extract_land_document_data(text):
+def extract_land_building_document_data(text):
     """
-    토지 관련 문서에서 데이터를 추출합니다.
+    토지 및 건물 관련 문서에서 데이터를 추출합니다.
     """
     data = {}
 
     # --- 규칙 0: 문서 범위 나누기 ---
     # 토지이용계획확인서
-    land_use_plan_section = slice_between(text, "문서확인번호", "등기사항전부증명서")
-    # 등기사항전부증명서
-    land_registry_section = slice_between(text, "등기사항전부증명서", "토지 대장")
-    # 주요 등기사항 요약
-    land_registry_summary_section = slice_between(text, "주요 등기사항 요약", "토지 대장")
+    land_use_plan_section = slice_between_occurrences(
+        text, "문서확인번호", "등기사항전부증명서",
+        include_start=True,
+        include_end=False,
+    )
+    # 등기사항전부증명서 [토지]
+    land_registry_section = slice_between_occurrences(
+        text, "등기사항전부증명서", "토지 대장",
+        include_start=True,
+        include_end=False,
+    )
+    # 주요 등기사항 요약 [토지]
+    land_registry_summary_section = slice_between_occurrences(
+        text, "주요 등기사항 요약", "토지 대장",
+        include_start=True,
+        include_end=False,
+    )
+
     # 토지 대장
-    land_register_section = slice_between(text, "토지 대장", "문서확인번호")
+    land_register_section = slice_between_occurrences(
+        text, "토지 대장", "문서확인번호",
+        include_start=True,
+        include_end=False,
+    )
 
     # === 표제부에서 필요한 정보 추출 ===
     # [토지] 추출
-    land_address_in_registry_1 = slice_including_to_before(land_registry_section, "[토지]", "표제부")
+    land_address_in_registry_1 = slice_between_occurrences(
+        land_registry_section, "[토지]", "표제부",
+        include_start=True,
+        include_end=False,
+    )
     land_address_in_registry_1 = land_address_in_registry_1.replace("[토지]", "").strip()
     if land_address_in_registry_1:
         data["[토지]"] = land_address_in_registry_1
@@ -698,7 +614,11 @@ def extract_land_document_data(text):
     # -------------------------------------
     # 갑 구 (소유권에 관한 사항)
     # -------------------------------------
-    land_registry_section_gabgu = slice_include_start_include_end(land_registry_section, "갑 구", "을 구")
+    land_registry_section_gabgu = slice_between_occurrences(
+        land_registry_section, "갑 구", "을 구",
+        include_start=True,
+        include_end=True
+    )
 
     # 갑구에서 마지막 칸 떼어내기
     land_registry_section_gabgu_last = slice_from_last_start_before_end_regex(
@@ -706,8 +626,10 @@ def extract_land_document_data(text):
     )
 
     # 갑구에서 등기목적 추출
-    land_registry_section_gabgu_last_purpose = slice_including_to_before(
-        land_registry_section_gabgu_last, " ", " "
+    land_registry_section_gabgu_last_purpose = slice_between_occurrences(
+        land_registry_section_gabgu_last, " ", " ",
+        include_start=True,
+        include_end=False,
     )
 
     if land_registry_section_gabgu_last_purpose:
@@ -843,7 +765,8 @@ def main():
     st.title("문서 비서📄 dev")
 
     # 개발 단계
-    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.4")
+    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.0.5")
+    st.subheader("v0.0.4에서 코드 정리 및 주석 보강")
 
     # 서비스 설명
     st.markdown(
