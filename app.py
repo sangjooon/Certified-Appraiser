@@ -778,7 +778,7 @@ def main():
     st.title("문서 비서📄 dev")
 
     # 개발 단계
-    st.subheader("토지의 소재지를 출력하는 프로토타입 v0.0.5")
+    st.subheader("프로토타입 v0.0.5")
     st.subheader("v0.0.4에서 코드 정리 및 주석 보강")
 
     # 서비스 설명
@@ -900,3 +900,4 @@ def main():
 # 실행
 if __name__ == "__main__":
     main()
+
