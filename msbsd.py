@@ -631,7 +631,20 @@ def extract_land_building_document_data(text):
         include_start=True,
         include_end=False,
     )
-
+    
+    # 9글자 넘는 예외 처리 [소유권이전청구권가등기, 공유자전원지분전부이전]
+    if land_registry_section_gabgu_last_purpose == "소유권이전청구권가":
+        land_registry_section_gabgu_last_purpose = "소유권이전청구권가등기"
+        land_registry_section_gabgu_last = land_registry_section_gabgu_last.replace(
+            "\n등기 ", "\n"
+        )
+    if land_registry_section_gabgu_last_purpose == "공유자전원지분전부":
+        land_registry_section_gabgu_last_purpose = "공유자전원지분전부이전"
+        land_registry_section_gabgu_last = land_registry_section_gabgu_last.replace(
+            "\n이전 ", "\n"
+        )
+     
+        
     if land_registry_section_gabgu_last_purpose:
         data["토지_등기_갑구_등기목적"] = land_registry_section_gabgu_last_purpose.strip()
     else:
