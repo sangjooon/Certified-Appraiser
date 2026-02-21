@@ -278,6 +278,107 @@ def extract_land_building_document_data(text):
         data["토지_등기_최종 소유자 일치 여부"] = "X"
 
 
+    # ==========================================
+    #    을 구
+    # ==========================================
+    def _pick_first_end_marker_after_start(source_text, start_marker, end_markers):
+        start_idx = source_text.find(start_marker)
+        if start_idx == -1:
+            return None
+
+        search_from = start_idx + len(start_marker)
+        best_marker = None
+        best_pos = len(source_text) + 1
+
+        for marker in end_markers:
+            pos = source_text.find(marker, search_from)
+            if pos != -1 and pos < best_pos:
+                best_pos = pos
+                best_marker = marker
+        return best_marker
+
+    eulgu_end_markers = [
+        "-- 이 하 여 백 --",
+        "--이하여백--",
+        "[매매 목록]",
+        "매매 목록",
+        "주요 등기사항 요약 (참고용)",
+        "주요 등기사항 요약(참고용)",
+        "주요 등기사항 요약",
+        "관할등기소",
+        "발행등기소",
+        "전산운영책임관",
+        "전산운영책임공무원",
+    ]
+
+    eulgu_end_marker = _pick_first_end_marker_after_start(
+        land_registry_section,
+        "을 구",
+        eulgu_end_markers,
+    )
+
+    land_registry_section_eulgu = slice_between_occurrences(
+        land_registry_section,
+        "을 구",
+        eulgu_end_marker,
+        include_start=True,
+        include_end=False,
+    )
+
+    if "기록사항 없음" in land_registry_section_eulgu:
+        data["토지_등기_을구_유효_등기목적"] = "기록사항 없음"
+    else:
+        ranks = [
+            m.group(1)
+            for m in re.finditer(r"(?m)^(\d+(?:-\d+)?)\s+", land_registry_section_eulgu)
+        ]
+
+        entries = []            # (rank, base_rank, purpose)
+        cancelled_base = set()  # 말소된 기본 순위번호(예: 5, 7, 11)
+
+        for i, rank in enumerate(ranks):
+            next_rank = ranks[i + 1] if i + 1 < len(ranks) else None
+
+            block = slice_between_occurrences(
+                land_registry_section_eulgu,
+                f"{rank} ",
+                f"{next_rank} " if next_rank else None,
+                include_start=True,
+                include_end=False,
+            )
+
+            head = " ".join(block.splitlines()[:2])
+            first_line = block.splitlines()[0] if block.splitlines() else ""
+
+            tail = (
+                first_line[len(rank):].strip()
+                if first_line.startswith(rank)
+                else first_line.strip()
+            )
+            purpose = re.split(
+                r"\s+(?:\d{4}년|\(전|제\d+호|접수|채권최고액|목\s*적|범\s*위|존속기간|지\s*료|공동담보)",
+                tail,
+                maxsplit=1,
+            )[0].strip()
+
+            # "n번 ... (기)말소"에서 n번 기본 등기를 취소 대상으로 기록
+            m_cancel = re.search(r"(\d+)번[\s\S]{0,40}?(?:기\s*)?말소", head)
+            if m_cancel:
+                cancelled_base.add(m_cancel.group(1))
+                continue
+
+            if purpose:
+                entries.append((rank, rank.split("-")[0], purpose))
+
+        live_purposes = [
+            f"{rank} {purpose}"
+            for rank, base_rank, purpose in entries
+            if base_rank not in cancelled_base
+        ]
+        data["토지_등기_을구_유효_등기목적"] = (
+            " | ".join(live_purposes) if live_purposes else "찾지 못함"
+        )
+
     return data
 
 
