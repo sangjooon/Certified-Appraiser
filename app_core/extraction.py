@@ -344,7 +344,7 @@ def extract_land_building_document_data(text):
 
             # "숫자1 숫자2"로 시작하고 말소/해지 문구가 있으면 숫자2 항목을 비움
             match = re.match(r"^\s*(\d+)\s+(\d+)\b", current_text)
-            if match and ("말소" in current_text and "해지" in current_text):
+            if match and ("말소" in current_text or "해지" in current_text):
                 target_rank = int(match.group(2))
                 target_key = f"land_registry_section_eulgu_{target_rank}"
                 if target_key in data:
