@@ -10,6 +10,7 @@ from .text_slice import (
     slice_from_last_start_before_end_regex,
 )
 
+
 #문서의 카테고리 추출
 def extract_pdf_category(text: str) -> str:
     """
@@ -277,6 +278,7 @@ def extract_land_building_document_data(text):
     else:
         data["토지_등기_최종 소유자 일치 여부"] = "X"
 
+
     # ==========================================
     #    을 구
     # ==========================================
@@ -304,36 +306,60 @@ def extract_land_building_document_data(text):
         data["토지_등기_을구"] = "기록사항 없음"
     else:
         data["토지_등기_을구"] = "기록사항 있음"
+        # 을구를 "\n숫자+공백" 기준으로 순차 분할
+        # 예: land_registry_section_eulgu_1, land_registry_section_eulgu_2, ...
+        top_ranks = [
+            m.group(1) for m in re.finditer(r"(?m)^(\d+)\s+", land_registry_section_eulgu)
+        ]
 
-    # 을구를 "\n숫자+공백" 기준으로 순차 분할
-    # 예: land_registry_section_eulgu_1, land_registry_section_eulgu_2, ...
-    top_ranks = [
-        m.group(1) for m in re.finditer(r"(?m)^(\d+)\s+", land_registry_section_eulgu)
-    ]
+        for i, rank in enumerate(top_ranks, start=1):
+            next_rank = top_ranks[i] if i < len(top_ranks) else None
 
-    for i, rank in enumerate(top_ranks, start=1):
-        next_rank = top_ranks[i] if i < len(top_ranks) else None
+            if i == 1:
+                start_marker = f"{rank} " if f"{rank} " in land_registry_section_eulgu else f"\n{rank} "
+            else:
+                start_marker = f"\n{rank} "
 
-        if i == 1:
-            start_marker = f"{rank} " if f"{rank} " in land_registry_section_eulgu else f"\n{rank} "
-        else:
-            start_marker = f"\n{rank} "
+            end_marker = f"\n{next_rank} " if next_rank else None
 
-        end_marker = f"\n{next_rank} " if next_rank else None
+            block = slice_between_occurrences(
+                land_registry_section_eulgu,
+                start_marker,
+                end_marker,
+                include_start=True,
+                include_end=False,
+            )
 
-        block = slice_between_occurrences(
-            land_registry_section_eulgu,
-            start_marker,
-            end_marker,
-            include_start=True,
-            include_end=False,
-        )
+            # 시작 마커를 "\n숫자 "로 잡은 경우 앞 개행 제거
+            block = block.lstrip("\n")
+            data[f"land_registry_section_eulgu_{i}"] = block.strip()
 
-        # 시작 마커를 "\n숫자 "로 잡은 경우 앞 개행 제거
-        block = block.lstrip("\n")
-        data[f"land_registry_section_eulgu_{i}"] = block.strip()
+        data["토지_등기_을구_분할개수"] = len(top_ranks)
+        
+        #말소 되거나 혜지된 section을 제거
+        counter_1 = 1 #"토지_등기_을구_분할개수"만큼 반복하기위한 변수
+        while(counter_1 <= data["토지_등기_을구_분할개수"]):
+            current_key = f"land_registry_section_eulgu_{counter_1}"
+            current_text = (data.get(current_key) or "").strip()
 
-    data["토지_등기_을구_분할개수"] = len(top_ranks)
+            # "숫자1 숫자2"로 시작하고 말소/해지 문구가 있으면 숫자2 항목을 비움
+            match = re.match(r"^\s*(\d+)\s+(\d+)\b", current_text)
+            if match and ("말소" in current_text and "해지" in current_text):
+                target_rank = int(match.group(2))
+                target_key = f"land_registry_section_eulgu_{target_rank}"
+                if target_key in data:
+                    data[target_key] = ""
+
+            counter_1 += 1
+        
+        
+    
+
+
+
+
+
+
 
 
 
