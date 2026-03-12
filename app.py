@@ -1265,32 +1265,119 @@ def _looks_like_sec_continuation_table(t: ParsedTable) -> bool:
     - 상단 행들에서 순위번호 형태가 2회 이상 보임
     - 표제부 고유 헤더(소재지번/지목/면적)가 강하게 보이지 않음
     """
-    if t.n_rows < 4 or t.n_cols < 4:
-        return False
+    meta = _analyze_sec_table_candidate(t)
+    return bool(meta.get("looks_like_continuation"))
+
+
+def _analyze_sec_table_candidate(t: ParsedTable) -> Dict[str, Any]:
+    """
+    갑/을구 연속표 가능성을 디버그 가능한 형태로 계산한다.
+    """
+    out: Dict[str, Any] = {
+        "page": int(t.page_no),
+        "table_id": str(t.table_id),
+        "n_rows": int(t.n_rows),
+        "n_cols": int(t.n_cols),
+        "header_row": -1,
+        "header_hits": [],
+        "nonempty_rows": 0,
+        "rank_like_rows": 0,
+        "purpose_keyword_rows": 0,
+        "date_like_rows": 0,
+        "holder_like_rows": 0,
+        "multi_cell_rows": 0,
+        "continuation_score": 0,
+        "pyo_like": False,
+        "looks_like_continuation": False,
+    }
+
+    if t.n_rows < 2 or t.n_cols < 3:
+        return out
 
     head_txt = _norm(" ".join(" ".join(t.grid[r]) for r in range(min(t.n_rows, 3))))
-    if any(k in head_txt for k in map(_norm, ["소재지번", "지목", "면적", "표시번호"])):
-        return False
+    out["pyo_like"] = any(k in head_txt for k in map(_norm, ["소재지번", "지목", "면적", "표시번호"]))
 
-    rank_hits = 0
-    nonempty_rows = 0
+    for r in range(min(t.n_rows, 10)):
+        row_norm = _norm(" ".join(t.grid[r]))
+        hits = [k for k, spec in GAB_ONTOLOGY.items() if _contains_any(row_norm, spec["aliases"])]
+        if ("rank" in hits) and (
+            len(hits) >= 4
+            or (("purpose" in hits) and ("acceptance" in hits))
+            or (("purpose" in hits) and ("holder" in hits))
+        ):
+            out["header_row"] = int(r)
+            out["header_hits"] = hits
+            break
+
     for r in range(min(t.n_rows, 30)):
         row = t.grid[r]
-        row_txt = " ".join((x or "").strip() for x in row).strip()
-        if not row_txt:
+        cells = [(x or "").strip() for x in row]
+        nonempty = [x for x in cells if x]
+        if not nonempty:
             continue
-        nonempty_rows += 1
 
-        probes = []
-        if t.n_cols >= 1:
-            probes.append(row[0])
-        if t.n_cols >= 2:
-            probes.append(row[1])
+        out["nonempty_rows"] += 1
+        if len(nonempty) >= min(3, max(2, t.n_cols)):
+            out["multi_cell_rows"] += 1
 
-        if any(_normalize_rank_text(p or "") for p in probes):
-            rank_hits += 1
+        left_cells = cells[: min(3, t.n_cols)]
+        has_rank = False
+        for cell in left_cells:
+            if _normalize_rank_text(cell):
+                has_rank = True
+                break
+            if _split_rank_prefix(cell)[0]:
+                has_rank = True
+                break
+            if _extract_rank_candidates(cell):
+                has_rank = True
+                break
+        if has_rank:
+            out["rank_like_rows"] += 1
 
-    return nonempty_rows >= 4 and rank_hits >= 2
+        row_text = " ".join(nonempty)
+        purpose_probe = " ".join(cells[1:min(t.n_cols, 4)]).strip() if t.n_cols > 1 else row_text
+        if _purpose_type(purpose_probe or row_text) in ("gab", "eul"):
+            out["purpose_keyword_rows"] += 1
+
+        if re.search(r"\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일", row_text) or re.search(r"제\s*\d+\s*호", row_text):
+            out["date_like_rows"] += 1
+
+        if t.n_cols >= 4:
+            if any(cells[c] for c in range(min(4, t.n_cols - 1), t.n_cols)):
+                out["holder_like_rows"] += 1
+        elif len(nonempty) >= 3:
+            out["holder_like_rows"] += 1
+
+    score = 0
+    if out["rank_like_rows"] >= 2:
+        score += 2
+    elif out["rank_like_rows"] >= 1:
+        score += 1
+    if out["purpose_keyword_rows"] >= 2:
+        score += 2
+    elif out["purpose_keyword_rows"] >= 1:
+        score += 1
+    if out["date_like_rows"] >= 2:
+        score += 2
+    elif out["date_like_rows"] >= 1:
+        score += 1
+    if out["holder_like_rows"] >= 2:
+        score += 1
+    if out["multi_cell_rows"] >= 2:
+        score += 1
+
+    out["continuation_score"] = score
+    out["looks_like_continuation"] = (not out["pyo_like"]) and out["nonempty_rows"] >= 2 and (
+        out["rank_like_rows"] >= 2
+        or score >= 4
+        or (
+            out["rank_like_rows"] >= 1
+            and out["purpose_keyword_rows"] >= 1
+            and out["date_like_rows"] >= 1
+        )
+    )
+    return out
 
 
 def find_gab_tables(
@@ -1303,7 +1390,7 @@ def find_gab_tables(
     out: List[Tuple[ParsedTable, int, Dict[str, int]]] = []
 
     for t in tables:
-        if t.n_rows < 2 or t.n_cols < 4:
+        if t.n_rows < 2 or t.n_cols < 3:
             continue
 
         header_row = -1
@@ -1311,7 +1398,11 @@ def find_gab_tables(
             row_norm = _norm(" ".join(t.grid[r]))
             hits = {k: 1 for k, spec in GAB_ONTOLOGY.items() if _contains_any(row_norm, spec["aliases"])}
             # 최소 조건: 순위번호 + 권리자 + 접수 + 등기목적 중 3~4개
-            if ("rank" in hits) and ("holder" in hits) and (len(hits) >= 4 or ("purpose" in hits and "acceptance" in hits)):
+            if ("rank" in hits) and (
+                len(hits) >= 4
+                or (("purpose" in hits) and ("acceptance" in hits))
+                or (("purpose" in hits) and ("holder" in hits))
+            ):
                 header_row = r
                 break
 
@@ -2770,6 +2861,7 @@ def process_pdf(
         "pyo_empty_tables": [],
         "pyo_accepted_tables": [],
         "section_candidates": [],
+        "section_rejected_tables": [],
         "section_skipped_tables": [],
         "section_accepted_tables": [],
         "eul_gap_recovery": [],
@@ -2894,6 +2986,37 @@ def process_pdf(
             {"page": t.page_no, "table_id": t.table_id, "header_row": header_row}
             for (t, header_row, _col_map) in sec_candidates
         ]
+        sec_candidate_ids = {t.table_id for (t, _header_row, _col_map) in sec_candidates}
+        pyo_table_ids = {t.table_id for (t, _df) in pyo_items}
+        rejected_rows: List[Dict[str, Any]] = []
+        for t in tables_for_registry:
+            if t.table_id in sec_candidate_ids:
+                continue
+            meta = _analyze_sec_table_candidate(t)
+            reason = "weak_sec_signal"
+            if t.table_id in pyo_table_ids or bool(meta.get("pyo_like")):
+                reason = "pyo_like_table"
+            elif int(meta.get("n_rows", 0)) < 2 or int(meta.get("n_cols", 0)) < 3:
+                reason = "table_too_small"
+            rejected_rows.append(
+                {
+                    "page": t.page_no,
+                    "table_id": t.table_id,
+                    "n_rows": int(meta.get("n_rows", 0)),
+                    "n_cols": int(meta.get("n_cols", 0)),
+                    "header_row": int(meta.get("header_row", -1)),
+                    "header_hits": ",".join(meta.get("header_hits", []) or []),
+                    "nonempty_rows": int(meta.get("nonempty_rows", 0)),
+                    "rank_like_rows": int(meta.get("rank_like_rows", 0)),
+                    "purpose_keyword_rows": int(meta.get("purpose_keyword_rows", 0)),
+                    "date_like_rows": int(meta.get("date_like_rows", 0)),
+                    "holder_like_rows": int(meta.get("holder_like_rows", 0)),
+                    "continuation_score": int(meta.get("continuation_score", 0)),
+                    "looks_like_continuation": bool(meta.get("looks_like_continuation", False)),
+                    "reason": reason,
+                }
+            )
+        debug_info["section_rejected_tables"] = rejected_rows
 
     # 그룹별 DF 누적
     gab_df_by_group: Dict[str, List[pd.DataFrame]] = {g.key: [] for g in groups}
@@ -3470,6 +3593,11 @@ def _render_debug_info(debug_info: Dict[str, Any]):
         if isinstance(pyo_empty, list) and len(pyo_empty) > 0:
             st.markdown("#### 표제부 후보 중 빈 결과")
             st.dataframe(pd.DataFrame(pyo_empty), use_container_width=True, hide_index=True)
+
+        sec_rejected = debug_info.get("section_rejected_tables", [])
+        if isinstance(sec_rejected, list) and len(sec_rejected) > 0:
+            st.markdown("#### 갑/을구 후보 탈락 테이블")
+            st.dataframe(pd.DataFrame(sec_rejected), use_container_width=True, hide_index=True)
 
         sec_skipped = debug_info.get("section_skipped_tables", [])
         if isinstance(sec_skipped, list) and len(sec_skipped) > 0:
