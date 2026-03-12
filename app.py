@@ -1227,6 +1227,42 @@ def classify_gab_or_eul(table: ParsedTable, page_lines: List[PageLine]) -> str:
     return "unknown"
 
 
+def _looks_like_sec_continuation_table(t: ParsedTable) -> bool:
+    """
+    헤더가 누락/파손된 갑·을구 연속 테이블을 약식 탐지.
+    조건:
+    - 행/열이 너무 작지 않고
+    - 상단 행들에서 순위번호 형태가 2회 이상 보임
+    - 표제부 고유 헤더(소재지번/지목/면적)가 강하게 보이지 않음
+    """
+    if t.n_rows < 4 or t.n_cols < 4:
+        return False
+
+    head_txt = _norm(" ".join(" ".join(t.grid[r]) for r in range(min(t.n_rows, 3))))
+    if any(k in head_txt for k in map(_norm, ["소재지번", "지목", "면적", "표시번호"])):
+        return False
+
+    rank_hits = 0
+    nonempty_rows = 0
+    for r in range(min(t.n_rows, 30)):
+        row = t.grid[r]
+        row_txt = " ".join((x or "").strip() for x in row).strip()
+        if not row_txt:
+            continue
+        nonempty_rows += 1
+
+        probes = []
+        if t.n_cols >= 1:
+            probes.append(row[0])
+        if t.n_cols >= 2:
+            probes.append(row[1])
+
+        if any(_normalize_rank_text(p or "") for p in probes):
+            rank_hits += 1
+
+    return nonempty_rows >= 4 and rank_hits >= 2
+
+
 def find_gab_tables(
     tables: List[ParsedTable],
 ) -> List[Tuple[ParsedTable, int, Dict[str, int]]]:
@@ -1248,27 +1284,30 @@ def find_gab_tables(
             if ("rank" in hits) and ("holder" in hits) and (len(hits) >= 4 or ("purpose" in hits and "acceptance" in hits)):
                 header_row = r
                 break
-        if header_row < 0:
-            continue
 
         col_map: Dict[str, int] = {}
-        for c in range(t.n_cols):
-            cell_norm = _norm(t.grid[header_row][c])
+        if header_row >= 0:
+            for c in range(t.n_cols):
+                cell_norm = _norm(t.grid[header_row][c])
 
-            if "rank" not in col_map and _contains_any(cell_norm, GAB_ONTOLOGY["rank"]["aliases"]):
-                col_map["rank"] = c
-                continue
-            if "purpose" not in col_map and _contains_any(cell_norm, GAB_ONTOLOGY["purpose"]["aliases"]):
-                col_map["purpose"] = c
-                continue
-            if "acceptance" not in col_map and _contains_any(cell_norm, GAB_ONTOLOGY["acceptance"]["aliases"]):
-                col_map["acceptance"] = c
-                continue
-            if "cause" not in col_map and _contains_any(cell_norm, GAB_ONTOLOGY["cause"]["aliases"]):
-                col_map["cause"] = c
-                continue
-            if "holder" not in col_map and _contains_any(cell_norm, GAB_ONTOLOGY["holder"]["aliases"]):
-                col_map["holder"] = c
+                if "rank" not in col_map and _contains_any(cell_norm, GAB_ONTOLOGY["rank"]["aliases"]):
+                    col_map["rank"] = c
+                    continue
+                if "purpose" not in col_map and _contains_any(cell_norm, GAB_ONTOLOGY["purpose"]["aliases"]):
+                    col_map["purpose"] = c
+                    continue
+                if "acceptance" not in col_map and _contains_any(cell_norm, GAB_ONTOLOGY["acceptance"]["aliases"]):
+                    col_map["acceptance"] = c
+                    continue
+                if "cause" not in col_map and _contains_any(cell_norm, GAB_ONTOLOGY["cause"]["aliases"]):
+                    col_map["cause"] = c
+                    continue
+                if "holder" not in col_map and _contains_any(cell_norm, GAB_ONTOLOGY["holder"]["aliases"]):
+                    col_map["holder"] = c
+                    continue
+        else:
+            # 헤더를 못 찾았지만 순위번호 패턴이 충분하면 연속표 후보로 채택
+            if not _looks_like_sec_continuation_table(t):
                 continue
 
         # fallback (일반적인 컬럼 순서)
