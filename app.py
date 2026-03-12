@@ -3584,6 +3584,19 @@ def _render_debug_info(debug_info: Dict[str, Any]):
                 f"토지등기 범위={table_counts.get('registry_tables', 0)}"
             )
 
+        sec_candidates = debug_info.get("section_candidates", [])
+        sec_rejected = debug_info.get("section_rejected_tables", [])
+        sec_skipped = debug_info.get("section_skipped_tables", [])
+        sec_ok = debug_info.get("section_accepted_tables", [])
+        if any(isinstance(x, list) and x is not None for x in [sec_candidates, sec_rejected, sec_skipped, sec_ok]):
+            st.write(
+                "갑/을구 파이프라인 요약: "
+                f"후보={len(sec_candidates) if isinstance(sec_candidates, list) else 0}, "
+                f"후보탈락={len(sec_rejected) if isinstance(sec_rejected, list) else 0}, "
+                f"후보후스킵={len(sec_skipped) if isinstance(sec_skipped, list) else 0}, "
+                f"최종반영={len(sec_ok) if isinstance(sec_ok, list) else 0}"
+            )
+
         page_trace = debug_info.get("land_page_trace", [])
         if isinstance(page_trace, list) and len(page_trace) > 0:
             st.markdown("#### 페이지 모드 추적")
@@ -3594,10 +3607,11 @@ def _render_debug_info(debug_info: Dict[str, Any]):
             st.markdown("#### 표제부 후보 중 빈 결과")
             st.dataframe(pd.DataFrame(pyo_empty), use_container_width=True, hide_index=True)
 
-        sec_rejected = debug_info.get("section_rejected_tables", [])
+        st.markdown("#### 갑/을구 후보 탈락 테이블")
         if isinstance(sec_rejected, list) and len(sec_rejected) > 0:
-            st.markdown("#### 갑/을구 후보 탈락 테이블")
             st.dataframe(pd.DataFrame(sec_rejected), use_container_width=True, hide_index=True)
+        else:
+            st.info("갑/을구 후보에서 탈락한 테이블이 없습니다.")
 
         sec_skipped = debug_info.get("section_skipped_tables", [])
         if isinstance(sec_skipped, list) and len(sec_skipped) > 0:
