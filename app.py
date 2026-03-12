@@ -1938,8 +1938,8 @@ def make_jsonld_bytes(obj: Dict[str, Any]) -> bytes:
 # 10) 전체 처리
 # ============================================================
 def _parse_rank_token(rank: Any) -> Optional[Tuple[int, int, str]]:
-    s = str(rank or "").strip()
-    m = re.match(r"^(\d+)(?:-(\d+))?$", s)
+    s = _normalize_rank_text(str(rank or "")) or str(rank or "").strip()
+    m = re.match(r"^(\d+)(?:-(\d+))?", s)
     if not m:
         return None
     return int(m.group(1)), int(m.group(2) or 0), s
@@ -2000,6 +2000,144 @@ def _find_rank_jump_warnings(df: pd.DataFrame) -> List[Dict[str, Any]]:
     return warnings
 
 
+def _rank_main_no(rank: Any) -> Optional[int]:
+    s = str(rank or "").strip()
+    if not s:
+        return None
+    m = re.match(r"^(\d+)", s)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def _find_missing_main_ranks(df: pd.DataFrame, *, max_gap: int = 8) -> List[int]:
+    if df is None or df.empty or "순위번호" not in df.columns:
+        return []
+
+    mains = sorted({m for m in (_rank_main_no(v) for v in df["순위번호"].tolist()) if m is not None})
+    if len(mains) < 2:
+        return []
+
+    miss: List[int] = []
+    for a, b in zip(mains, mains[1:]):
+        gap = b - a
+        if 1 < gap <= max_gap:
+            miss.extend(list(range(a + 1, b)))
+    return sorted(set(miss))
+
+
+def _sort_sec_df_by_rank(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or "순위번호" not in df.columns:
+        return df
+
+    def rank_key(x: Any) -> Tuple[int, int, str]:
+        s = str(x or "").strip()
+        m = re.match(r"^(\d+)(?:-(\d+))?", s)
+        if not m:
+            return (10**9, 0, s)
+        return int(m.group(1)), int(m.group(2) or 0), s
+
+    out = df.copy()
+    out["_rk"] = out["순위번호"].apply(rank_key)
+    out = out.sort_values("_rk").drop(columns=["_rk"], errors="ignore")
+    return out
+
+
+def _recover_rows_from_table_by_missing_mains(
+    t: ParsedTable,
+    missing_main_set: set,
+    *,
+    section: str,
+    header_row: int = -1,
+    col_map: Optional[Dict[str, int]] = None,
+) -> pd.DataFrame:
+    """
+    결번(main rank)만 대상으로 느슨하게 행 복구.
+    - 기존 추출 경로에서 놓친 3,4 같은 행을 보완하는 용도
+    """
+    if not missing_main_set:
+        return pd.DataFrame()
+    if t.n_rows < 2 or t.n_cols < 2:
+        return pd.DataFrame()
+
+    cm = dict(col_map or {})
+    c_rank = max(0, min(int(cm.get("rank", 0)), t.n_cols - 1))
+    c_purpose = max(0, min(int(cm.get("purpose", min(1, t.n_cols - 1))), t.n_cols - 1))
+    c_acc = max(0, min(int(cm.get("acceptance", min(2, t.n_cols - 1))), t.n_cols - 1))
+    c_cause = max(0, min(int(cm.get("cause", min(3, t.n_cols - 1))), t.n_cols - 1))
+    c_holder = max(0, min(int(cm.get("holder", min(4, t.n_cols - 1))), t.n_cols - 1))
+
+    def _cell_or_join(row: List[str], c0: int, c1: int) -> str:
+        if c0 < c1:
+            return join_cols(row, c0, c1, sep="\n")
+        return (row[c0] or "").strip()
+
+    records: List[Dict[str, Any]] = []
+    start_r = max(0, int(header_row) + 1)
+    for r in range(start_r, t.n_rows):
+        row = t.grid[r]
+        if all((not (row[c] or "").strip()) for c in range(t.n_cols)):
+            continue
+
+        rank = _normalize_rank_text(row[c_rank] or "")
+        if not rank:
+            for c in range(min(3, t.n_cols)):
+                probe = _normalize_rank_text(row[c] or "")
+                if probe:
+                    rank = probe
+                    break
+        if not rank:
+            for c in range(min(3, t.n_cols)):
+                rp, _rest = _split_rank_prefix(row[c] or "")
+                if rp:
+                    rank = rp
+                    break
+        if not rank:
+            continue
+        if _contains_any(_norm(rank), ["순위번호", "갑구", "을구", "표제부"]):
+            continue
+
+        main_no = _rank_main_no(rank)
+        if main_no is None or main_no not in missing_main_set:
+            continue
+
+        purpose = _cell_or_join(row, c_purpose, c_acc)
+        acc = _cell_or_join(row, c_acc, c_cause)
+        cause = _cell_or_join(row, c_cause, c_holder)
+        holder = join_cols(row, c_holder, t.n_cols, sep="\n")
+
+        if not purpose:
+            purpose = (row[min(1, t.n_cols - 1)] or "").strip()
+        if not acc and t.n_cols >= 3:
+            acc = (row[min(2, t.n_cols - 1)] or "").strip()
+        if not cause and t.n_cols >= 4:
+            cause = (row[min(3, t.n_cols - 1)] or "").strip()
+
+        ptype = _purpose_type(purpose)
+        if section == "을구" and ptype == "gab":
+            continue
+        if section == "갑구" and ptype == "eul":
+            continue
+
+        records.append(
+            {
+                "페이지": t.page_no,
+                "table_id": t.table_id,
+                "순위번호": rank,
+                "등기목적": purpose,
+                "접수": acc,
+                "등기원인": cause,
+                "권리자 및 기타사항": holder,
+            }
+        )
+
+    out = pd.DataFrame(records)
+    if out.empty:
+        return out
+    out = out.drop_duplicates()
+    return _sort_sec_df_by_rank(out)
+
+
 def process_pdf(
     file_bytes: bytes,
     api_url: str,
@@ -2032,6 +2170,7 @@ def process_pdf(
         "section_candidates": [],
         "section_skipped_tables": [],
         "section_accepted_tables": [],
+        "eul_gap_recovery": [],
         "group_ranges": [],
         "rank_jump_warnings": [],
     }
@@ -2164,8 +2303,11 @@ def process_pdf(
         return (int(t.page_no), y0, str(t.table_id))
 
     sec_candidates.sort(key=_tbl_sort_key)
+    sec_colmap_by_id: Dict[str, Dict[str, Any]] = {}
+    section_hint_by_table: Dict[str, str] = {}
 
     for (t, header_row, col_map) in sec_candidates:
+        sec_colmap_by_id[t.table_id] = {"header_row": header_row, "col_map": dict(col_map)}
         # 1차: 페이지 라벨(갑구/을구) 기반 분류
         section_by_label = classify_gab_or_eul(t, all_page_lines.get(t.page_no, []))
         section_by_kw = guess_section_by_purpose_keywords(t, header_row, col_map)
@@ -2179,6 +2321,7 @@ def process_pdf(
         # (을구에서 '근저당권이전/변경' 같은 키워드가 갑구로 오판되는 것을 방지)
         if section_by_label in ("갑구", "을구"):
             section = section_by_label
+        section_hint_by_table[t.table_id] = section
 
         if section not in ("갑구", "을구"):
             if debug:
@@ -2263,6 +2406,80 @@ def process_pdf(
             g.eul_df = eul_df[[c for c in cols if c in eul_df.columns]]
         else:
             g.eul_df = pd.DataFrame(columns=["순위번호", "등기목적", "접수", "등기원인", "권리자 및 기타사항"])
+
+    # --------------------
+    # 을구 결번 복구(post-recovery)
+    # --------------------
+    for g in groups:
+        if not isinstance(g.eul_df, pd.DataFrame) or g.eul_df.empty:
+            continue
+
+        missing_mains = _find_missing_main_ranks(g.eul_df)
+        if not missing_mains:
+            continue
+
+        missing_set = set(missing_mains)
+        recovered_parts: List[pd.DataFrame] = []
+
+        cand_tables = [t for t in tables_for_registry if g.start_page <= t.page_no <= g.end_page]
+        cand_tables.sort(key=lambda t: (int(t.page_no), float(t.bbox[1]) if t.bbox else 0.0, str(t.table_id)))
+
+        for t in cand_tables:
+            if not missing_set:
+                break
+
+            sec_hint = section_hint_by_table.get(t.table_id, "unknown")
+            if sec_hint == "갑구":
+                continue
+
+            # 힌트가 불명확하면 라벨/연속표 형태를 이용해 을구 복구 대상으로만 제한
+            if sec_hint == "unknown":
+                by_label = classify_gab_or_eul(t, all_page_lines.get(t.page_no, []))
+                if by_label == "갑구":
+                    continue
+                if by_label == "을구":
+                    sec_hint = "을구"
+                elif not _looks_like_sec_continuation_table(t):
+                    continue
+                else:
+                    sec_hint = "을구"
+
+            meta = sec_colmap_by_id.get(t.table_id, {})
+            header_row = int(meta.get("header_row", -1))
+            cmap = meta.get("col_map", {}) if isinstance(meta.get("col_map", {}), dict) else {}
+
+            rec = _recover_rows_from_table_by_missing_mains(
+                t,
+                missing_set,
+                section="을구",
+                header_row=header_row,
+                col_map=cmap,
+            )
+            if rec.empty:
+                continue
+
+            recovered_parts.append(rec)
+            recovered_main = {
+                m for m in (_rank_main_no(v) for v in rec.get("순위번호", pd.Series(dtype=str)).tolist()) if m is not None
+            }
+            missing_set -= recovered_main
+
+        if recovered_parts:
+            base = g.eul_df if isinstance(g.eul_df, pd.DataFrame) else pd.DataFrame()
+            merged = pd.concat([base] + recovered_parts, ignore_index=True).drop_duplicates()
+            merged = _sort_sec_df_by_rank(merged)
+            cols = ["페이지", "table_id", "순위번호", "등기목적", "접수", "등기원인", "권리자 및 기타사항"]
+            g.eul_df = merged[[c for c in cols if c in merged.columns]]
+
+        if debug:
+            debug_info["eul_gap_recovery"].append(
+                {
+                    "group_key": g.key,
+                    "before_missing_main_ranks": missing_mains,
+                    "remaining_missing_main_ranks": sorted(missing_set),
+                    "recovered_parts": len(recovered_parts),
+                }
+            )
 
     # 표제부 DF 중복 제거
     for g in groups:
@@ -2540,6 +2757,11 @@ def _render_debug_info(debug_info: Dict[str, Any]):
         if isinstance(sec_ok, list) and len(sec_ok) > 0:
             st.markdown("#### 갑/을구 반영 테이블")
             st.dataframe(pd.DataFrame(sec_ok), use_container_width=True, hide_index=True)
+
+        eul_recovery = debug_info.get("eul_gap_recovery", [])
+        if isinstance(eul_recovery, list) and len(eul_recovery) > 0:
+            st.markdown("#### 을구 결번 복구 로그")
+            st.dataframe(pd.DataFrame(eul_recovery), use_container_width=True, hide_index=True)
 
         jumps = debug_info.get("rank_jump_warnings", [])
         if isinstance(jumps, list) and len(jumps) > 0:
