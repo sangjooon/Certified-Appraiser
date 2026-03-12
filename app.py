@@ -556,6 +556,7 @@ def join_cols(row: List[str], start: int, end: int, *, sep: str = "\n") -> str:
 
 RANK_TEXT_RE = re.compile(r"^\s*(\d+(?:-\d+)?)(?:\s*\([^)]*\))?\s*$")
 RANK_PREFIX_RE = re.compile(r"^\s*(\d+(?:-\d+)?(?:\s*\([^)]*\))?)\s*(.*)$", re.S)
+RANK_ANY_RE = re.compile(r"(?<!\d)(\d+(?:-\d+)?(?:\s*\([^)]*\))?)(?!\d)")
 
 
 def _normalize_rank_text(v: str) -> str:
@@ -583,6 +584,35 @@ def _split_rank_prefix(text: str) -> Tuple[str, str]:
         return "", s
     rest = (m.group(2) or "").strip()
     return rank_candidate, rest
+
+
+def _extract_rank_candidates(text: str) -> List[str]:
+    """
+    텍스트 내부의 순위번호 토큰 후보를 추출.
+    (결번 복구용: '3 4', '3(전3)' 같은 케이스 보강)
+    """
+    s = (text or "").strip()
+    if not s:
+        return []
+    out: List[str] = []
+    for m in RANK_ANY_RE.finditer(s):
+        tok = _normalize_rank_text(m.group(1) or "")
+        if not tok:
+            continue
+        main = _rank_main_no(tok)
+        # 연도/금액 등 큰 숫자 오탐 방지
+        if main is None or main > 300:
+            continue
+        out.append(tok)
+    # 순서 유지 unique
+    seen = set()
+    uniq = []
+    for x in out:
+        if x in seen:
+            continue
+        seen.add(x)
+        uniq.append(x)
+    return uniq
 
 
 # ============================================================
@@ -2073,19 +2103,25 @@ def _recover_rows_from_table_by_missing_mains(
         return (row[c0] or "").strip()
 
     records: List[Dict[str, Any]] = []
-    start_r = max(0, int(header_row) + 1)
+    # 결번 복구는 헤더 오판 가능성을 고려해 테이블 전체 스캔
+    start_r = 0
     for r in range(start_r, t.n_rows):
         row = t.grid[r]
         if all((not (row[c] or "").strip()) for c in range(t.n_cols)):
             continue
 
         rank = _normalize_rank_text(row[c_rank] or "")
+        rank_candidates: List[str] = []
         if not rank:
             for c in range(min(3, t.n_cols)):
-                probe = _normalize_rank_text(row[c] or "")
-                if probe:
-                    rank = probe
+                rank_candidates.extend(_extract_rank_candidates(row[c] or ""))
+            for rk in rank_candidates:
+                mn = _rank_main_no(rk)
+                if mn in missing_main_set:
+                    rank = rk
                     break
+            if not rank and rank_candidates:
+                rank = rank_candidates[0]
         if not rank:
             for c in range(min(3, t.n_cols)):
                 rp, _rest = _split_rank_prefix(row[c] or "")
@@ -2130,6 +2166,58 @@ def _recover_rows_from_table_by_missing_mains(
                 "권리자 및 기타사항": holder,
             }
         )
+
+    # row 단위에서 놓친 결번을 cell 단위로 재복구 (예: 한 셀에 '3\\n4')
+    recovered_mains = {
+        m for m in (_rank_main_no(rec.get("순위번호", "")) for rec in records) if m is not None
+    }
+    unresolved = set(missing_main_set) - recovered_mains
+    if unresolved:
+        cells_sorted = sorted(t.cells, key=lambda c: (int(c.row), int(c.col)))
+        for cell in cells_sorted:
+            if not unresolved:
+                break
+            # 순위번호는 보통 좌측 컬럼에 위치
+            if int(cell.col) > max(2, c_rank + 1):
+                continue
+            for rk in _extract_rank_candidates(cell.text or ""):
+                mn = _rank_main_no(rk)
+                if mn is None or mn not in unresolved:
+                    continue
+                rr = int(cell.row)
+                if rr < 0 or rr >= t.n_rows:
+                    continue
+                row = t.grid[rr]
+                purpose = _cell_or_join(row, c_purpose, c_acc)
+                acc = _cell_or_join(row, c_acc, c_cause)
+                cause = _cell_or_join(row, c_cause, c_holder)
+                holder = join_cols(row, c_holder, t.n_cols, sep="\n")
+                if not purpose:
+                    purpose = (row[min(1, t.n_cols - 1)] or "").strip()
+                if not acc and t.n_cols >= 3:
+                    acc = (row[min(2, t.n_cols - 1)] or "").strip()
+                if not cause and t.n_cols >= 4:
+                    cause = (row[min(3, t.n_cols - 1)] or "").strip()
+
+                ptype = _purpose_type(purpose)
+                if section == "을구" and ptype == "gab":
+                    continue
+                if section == "갑구" and ptype == "eul":
+                    continue
+
+                records.append(
+                    {
+                        "페이지": t.page_no,
+                        "table_id": t.table_id,
+                        "순위번호": rk,
+                        "등기목적": purpose,
+                        "접수": acc,
+                        "등기원인": cause,
+                        "권리자 및 기타사항": holder,
+                    }
+                )
+                unresolved.discard(mn)
+                break
 
     out = pd.DataFrame(records)
     if out.empty:
@@ -2429,8 +2517,6 @@ def process_pdf(
                 break
 
             sec_hint = section_hint_by_table.get(t.table_id, "unknown")
-            if sec_hint == "갑구":
-                continue
 
             # 힌트가 불명확하면 라벨/연속표 형태를 이용해 을구 복구 대상으로만 제한
             if sec_hint == "unknown":
@@ -2478,6 +2564,7 @@ def process_pdf(
                     "before_missing_main_ranks": missing_mains,
                     "remaining_missing_main_ranks": sorted(missing_set),
                     "recovered_parts": len(recovered_parts),
+                    "candidate_tables_in_range": len(cand_tables),
                 }
             )
 
