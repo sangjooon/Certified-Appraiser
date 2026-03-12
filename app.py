@@ -1596,6 +1596,24 @@ def assign_table_to_group(groups: List[ParcelGroup], page_no: int) -> Optional[P
     return None
 
 
+def _normalize_lot_key(v: Any) -> str:
+    return re.sub(r"\s+", "", str(v or "").strip())
+
+
+def _is_probable_lot_key(v: Any) -> bool:
+    return re.fullmatch(r"\d{1,5}(?:-\d{1,5})?", _normalize_lot_key(v)) is not None
+
+
+def find_group_by_lot_key(groups: List[ParcelGroup], lot_key: str) -> Optional[ParcelGroup]:
+    nk = _normalize_lot_key(lot_key)
+    if not _is_probable_lot_key(nk):
+        return None
+    for g in groups:
+        if _is_probable_lot_key(g.key) and _normalize_lot_key(g.key) == nk:
+            return g
+    return None
+
+
 # -----------------------------
 # (보강) 갑구 테이블을 지번(필지) 그룹에 더 정확히 매핑하기 위한 lot 추정
 # -----------------------------
@@ -1639,8 +1657,8 @@ def guess_lot_from_table_text(t: ParsedTable) -> str:
     - 권리자/기타사항에 주소(…리 496-10)가 들어가는 케이스가 많아 효과적
     """
     scores: Dict[str, float] = {}
-    # 너무 큰 테이블도 있으니, 상단 40행 정도만
-    max_r = min(t.n_rows, 40)
+    # 너무 큰 테이블도 있으니, 상단 80행 정도만
+    max_r = min(t.n_rows, 80)
     for r in range(max_r):
         row_txt = " ".join((t.grid[r][c] or "") for c in range(t.n_cols))
         for lot in _LOT_SHORT_RE.findall(row_txt):
@@ -1654,16 +1672,42 @@ def guess_lot_from_table_text(t: ParsedTable) -> str:
     return max(scores.items(), key=lambda x: x[1])[0]
 
 
-def guess_lot_key_for_gab_table(t: ParsedTable, page_lines: List[PageLine]) -> str:
+def guess_lot_key_for_sec_table(t: ParsedTable, page_lines: List[PageLine]) -> str:
     """
-    갑구 테이블의 지번 key 추정:
+    갑/을구 테이블의 지번 key 추정:
     1) 테이블 텍스트에서 추정
     2) 실패 시 페이지 라인에서 추정
     """
     lot = guess_lot_from_table_text(t)
     if lot:
-        return lot
-    return guess_lot_from_lines(page_lines)
+        return _normalize_lot_key(lot)
+    return _normalize_lot_key(guess_lot_from_lines(page_lines))
+
+
+def guess_lot_key_for_gab_table(t: ParsedTable, page_lines: List[PageLine]) -> str:
+    return guess_lot_key_for_sec_table(t, page_lines)
+
+
+def assign_section_table_to_group(
+    groups: List[ParcelGroup],
+    t: ParsedTable,
+    page_lines: List[PageLine],
+) -> Tuple[Optional[ParcelGroup], str, str]:
+    """
+    갑/을구 테이블을 우선 지번 추정값으로, 실패 시 페이지 범위로 그룹에 할당.
+    반환: (group, assign_mode, guessed_lot)
+    """
+    guessed_lot = guess_lot_key_for_sec_table(t, page_lines)
+    if guessed_lot:
+        g_by_lot = find_group_by_lot_key(groups, guessed_lot)
+        if g_by_lot is not None:
+            return g_by_lot, "lot_guess", guessed_lot
+
+    g_by_page = assign_table_to_group(groups, t.page_no)
+    if g_by_page is not None:
+        return g_by_page, "page_range", guessed_lot
+
+    return None, "unassigned", guessed_lot
 
 
 # ============================================================
@@ -2827,6 +2871,11 @@ def process_pdf(
             g.pyo_tables.append(t)
             g.pyo_df = pd.concat([g.pyo_df, df], ignore_index=True) if isinstance(g.pyo_df, pd.DataFrame) and not g.pyo_df.empty else df
 
+    lot_guess_by_table: Dict[str, str] = {
+        t.table_id: guess_lot_key_for_sec_table(t, all_page_lines.get(t.page_no, []))
+        for t in tables_for_registry
+    }
+
     # --------------------
     # 갑/을구 추출
     # --------------------
@@ -2906,8 +2955,12 @@ def process_pdf(
                 )
             continue
 
-        # ✅ 기본: 표제부(start_page) 기반 페이지 범위로 그룹 할당
-        g = assign_table_to_group(groups, t.page_no)
+        # ✅ 우선: 지번 추정 기반 할당, 실패 시 페이지 범위 fallback
+        g, group_assign_mode, guessed_lot = assign_section_table_to_group(
+            groups,
+            t,
+            all_page_lines.get(t.page_no, []),
+        )
 
         if g is None:
             # 마지막 fallback: UNKNOWN
@@ -2917,6 +2970,7 @@ def process_pdf(
                 groups.append(g)
                 gab_df_by_group.setdefault(g.key, [])
                 eul_df_by_group.setdefault(g.key, [])
+            group_assign_mode = "unknown_fallback"
 
         if section == "갑구":
             g.gab_tables.append(t)
@@ -2930,13 +2984,15 @@ def process_pdf(
                 {
                     "page": t.page_no,
                     "table_id": t.table_id,
-                    "section_by_label": section_by_label,
-                    "section_by_kw": section_by_kw,
-                    "final_section": section,
-                    "group_key": g.key,
-                    "row_count": int(len(df)),
-                }
-            )
+                        "section_by_label": section_by_label,
+                        "section_by_kw": section_by_kw,
+                        "final_section": section,
+                        "group_key": g.key,
+                        "lot_guess": guessed_lot,
+                        "group_assign_mode": group_assign_mode,
+                        "row_count": int(len(df)),
+                    }
+                )
 
     # 그룹별 DF finalize
     for g in groups:
@@ -2979,7 +3035,15 @@ def process_pdf(
         if not pages_in_group:
             pages_in_group = list(range(g.start_page, g.end_page + 1))
 
-        cand_tables = [t for t in tables_for_registry if g.start_page <= t.page_no <= g.end_page]
+        group_lot_key = _normalize_lot_key(g.key)
+        group_has_lot_key = _is_probable_lot_key(group_lot_key)
+        cand_tables = []
+        for t in tables_for_registry:
+            guessed_lot = lot_guess_by_table.get(t.table_id, "")
+            page_match = g.start_page <= t.page_no <= g.end_page
+            lot_match = group_has_lot_key and guessed_lot == group_lot_key
+            if lot_match or (page_match and (not group_has_lot_key or not guessed_lot)):
+                cand_tables.append(t)
         cand_tables.sort(key=lambda t: (int(t.page_no), float(t.bbox[1]) if t.bbox else 0.0, str(t.table_id)))
 
         for t in cand_tables:
@@ -3141,22 +3205,18 @@ def process_pdf(
     # --------------------
     # 그룹 범위 재계산(표제부를 못 찾은 지번이 갑구에서 추가된 경우 대비)
     # --------------------
-    # start_page 보강: pyo_tables/gab_tables의 최소 페이지로 재계산
+    # 지번 추정 기반 할당을 쓰면 그룹 페이지 범위가 겹칠 수 있으므로,
+    # 다른 그룹의 start_page로 끊지 않고 각 그룹의 실제 min/max page를 사용한다.
     for g in groups:
         pages = []
         pages.extend([t.page_no for t in g.pyo_tables])
         pages.extend([t.page_no for t in g.gab_tables])
         pages.extend([t.page_no for t in g.eul_tables])
         if pages:
-            g.start_page = min([g.start_page] + pages)
+            g.start_page = min(pages)
+            g.end_page = max(pages)
 
     groups.sort(key=lambda x: x.start_page)
-
-    for i in range(len(groups)):
-        if i < len(groups) - 1:
-            groups[i].end_page = max(groups[i].start_page, groups[i + 1].start_page - 1)
-        else:
-            groups[i].end_page = last_registry_page
 
     if debug:
         debug_info["group_ranges"] = [
