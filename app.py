@@ -1694,18 +1694,27 @@ def assign_section_table_to_group(
     page_lines: List[PageLine],
 ) -> Tuple[Optional[ParcelGroup], str, str]:
     """
-    갑/을구 테이블을 우선 지번 추정값으로, 실패 시 페이지 범위로 그룹에 할당.
+    갑/을구 테이블을 페이지 범위를 기본 축으로 두고, 지번 추정은 보조 신호로 사용한다.
     반환: (group, assign_mode, guessed_lot)
     """
     guessed_lot = guess_lot_key_for_sec_table(t, page_lines)
-    if guessed_lot:
-        g_by_lot = find_group_by_lot_key(groups, guessed_lot)
-        if g_by_lot is not None:
-            return g_by_lot, "lot_guess", guessed_lot
-
     g_by_page = assign_table_to_group(groups, t.page_no)
+    g_by_lot = find_group_by_lot_key(groups, guessed_lot) if guessed_lot else None
+
+    if g_by_page is not None and g_by_lot is not None:
+        if g_by_page.key == g_by_lot.key:
+            return g_by_page, "page_range_lot_agree", guessed_lot
+        if g_by_page.key == "UNKNOWN":
+            return g_by_lot, "lot_guess_only", guessed_lot
+        # 을구/갑구 본문에는 공동담보 등 다른 지번이 자주 섞여서
+        # lot guess가 오탐일 수 있으므로, 충돌 시 page range를 우선한다.
+        return g_by_page, "page_range_conflict", guessed_lot
+
     if g_by_page is not None:
         return g_by_page, "page_range", guessed_lot
+
+    if g_by_lot is not None:
+        return g_by_lot, "lot_guess_only", guessed_lot
 
     return None, "unassigned", guessed_lot
 
@@ -3042,9 +3051,11 @@ def process_pdf(
             guessed_lot = lot_guess_by_table.get(t.table_id, "")
             page_match = g.start_page <= t.page_no <= g.end_page
             lot_match = group_has_lot_key and guessed_lot == group_lot_key
-            if lot_match or (page_match and (not group_has_lot_key or not guessed_lot)):
+            # page range 안의 테이블은 항상 보되, 지번 추정이 맞는 테이블은 범위 밖이어도 보조 후보로 포함
+            if page_match or lot_match:
                 cand_tables.append(t)
         cand_tables.sort(key=lambda t: (int(t.page_no), float(t.bbox[1]) if t.bbox else 0.0, str(t.table_id)))
+        pages_in_group = sorted(set(pages_in_group) | {int(t.page_no) for t in cand_tables})
 
         for t in cand_tables:
             if not missing_set:
