@@ -2535,6 +2535,158 @@ def _recover_rows_from_page_lines_by_missing_mains(
     return _sort_sec_df_by_rank(out)
 
 
+def _extract_main_nos_from_rankish_text(text: str) -> List[int]:
+    """
+    rank처럼 보이는 텍스트에서 main rank 번호만 추출.
+    - 디버그 provenance용이라 엄격한 파싱보다 '있었는지' 판별에 초점을 둔다.
+    """
+    s = (text or "").strip()
+    if not s:
+        return []
+
+    mains: List[int] = []
+
+    norm = _normalize_rank_text(s)
+    if norm:
+        mn = _rank_main_no(norm)
+        if mn is not None and mn <= 300:
+            mains.append(mn)
+
+    rp, _rest = _split_rank_prefix(s)
+    if rp:
+        mn = _rank_main_no(rp)
+        if mn is not None and mn <= 300:
+            mains.append(mn)
+
+    for rk in _extract_rank_candidates(s):
+        mn = _rank_main_no(rk)
+        if mn is not None and mn <= 300:
+            mains.append(mn)
+
+    return sorted(set(mains))
+
+
+def _is_potential_eul_source_table(
+    t: ParsedTable,
+    section_hint_by_table: Dict[str, str],
+    page_lines: List[PageLine],
+) -> bool:
+    """
+    을구 provenance 진단 시 참고할 만한 테이블만 선별.
+    - 갑구로 판단된 테이블은 제외
+    - 을구/연속표 후보는 포함
+    """
+    sec_hint = section_hint_by_table.get(t.table_id, "unknown")
+    if sec_hint == "갑구":
+        return False
+    if sec_hint == "을구":
+        return True
+
+    by_label = classify_gab_or_eul(t, page_lines)
+    if by_label == "갑구":
+        return False
+    if by_label == "을구":
+        return True
+
+    return _looks_like_sec_continuation_table(t)
+
+
+def _collect_missing_rank_source_provenance(
+    *,
+    group_key: str,
+    target_mains: List[int],
+    final_eul_df: pd.DataFrame,
+    candidate_tables: List[ParsedTable],
+    pages_in_group: List[int],
+    all_page_lines: Dict[int, List[PageLine]],
+) -> List[Dict[str, Any]]:
+    """
+    결번 순위번호가 OCR 원응답의 어느 층위에 있었는지 추적.
+    - grid: 구조화된 table row/col
+    - cells: raw table cell 텍스트
+    - fields: 일반 OCR line
+    """
+    if not target_mains:
+        return []
+
+    final_mains = {
+        m for m in (_rank_main_no(v) for v in final_eul_df.get("순위번호", pd.Series(dtype=str)).tolist()) if m is not None
+    }
+
+    out: List[Dict[str, Any]] = []
+    table_col_limit = 2  # rank가 놓일 가능성이 높은 좌측 컬럼만 본다.
+
+    for target in sorted(set(target_mains)):
+        grid_tables: List[str] = []
+        grid_pages: set = set()
+        cell_tables: List[str] = []
+        cell_pages: set = set()
+        field_pages: set = set()
+
+        for t in candidate_tables:
+            grid_hit_here = False
+            for r in range(t.n_rows):
+                for c in range(min(table_col_limit, t.n_cols)):
+                    if target in _extract_main_nos_from_rankish_text(t.grid[r][c] or ""):
+                        grid_tables.append(t.table_id)
+                        grid_pages.add(int(t.page_no))
+                        grid_hit_here = True
+                        break
+                if grid_hit_here:
+                    break
+
+            for cell in t.cells:
+                if int(cell.col) >= table_col_limit:
+                    continue
+                if target in _extract_main_nos_from_rankish_text(cell.text or ""):
+                    cell_tables.append(t.table_id)
+                    cell_pages.add(int(t.page_no))
+                    break
+
+        for p in pages_in_group:
+            lines = all_page_lines.get(p, [])
+            if not lines:
+                continue
+            for ln in lines:
+                rk = _leading_rank_from_line(ln.text or "")
+                if _rank_main_no(rk) == target:
+                    field_pages.add(int(p))
+                    break
+
+        grid_hit = len(grid_tables) > 0
+        cell_hit = len(cell_tables) > 0
+        fields_hit = len(field_pages) > 0
+        final_hit = target in final_mains
+
+        if final_hit:
+            diagnosis = "최종 결과 반영됨"
+        elif not cell_hit and not fields_hit:
+            diagnosis = "CLOVA 원응답 누락 의심"
+        elif (cell_hit or fields_hit) and not grid_hit:
+            diagnosis = "raw OCR 존재, 구조화 단계 누락 의심"
+        else:
+            diagnosis = "구조화 OCR 존재, 최종 파싱 누락 의심"
+
+        out.append(
+            {
+                "group_key": group_key,
+                "rank_main": target,
+                "present_in_final_eul_df": final_hit,
+                "grid_hit": grid_hit,
+                "grid_hit_pages": sorted(grid_pages),
+                "grid_hit_tables": sorted(set(grid_tables)),
+                "cell_hit": cell_hit,
+                "cell_hit_pages": sorted(cell_pages),
+                "cell_hit_tables": sorted(set(cell_tables)),
+                "fields_hit": fields_hit,
+                "fields_hit_pages": sorted(field_pages),
+                "diagnosis": diagnosis,
+            }
+        )
+
+    return out
+
+
 def process_pdf(
     file_bytes: bytes,
     api_url: str,
@@ -2569,6 +2721,7 @@ def process_pdf(
         "section_accepted_tables": [],
         "eul_gap_recovery": [],
         "eul_fields_recovery": [],
+        "eul_source_provenance": [],
         "group_ranges": [],
         "rank_jump_warnings": [],
     }
@@ -2822,6 +2975,9 @@ def process_pdf(
         cell_cluster_recovered_ranks: List[str] = []
         fields_recovered_rows = 0
         fields_recovered_ranks: List[str] = []
+        pages_in_group = sorted({p for p in land_registry_pages if g.start_page <= p <= g.end_page})
+        if not pages_in_group:
+            pages_in_group = list(range(g.start_page, g.end_page + 1))
 
         cand_tables = [t for t in tables_for_registry if g.start_page <= t.page_no <= g.end_page]
         cand_tables.sort(key=lambda t: (int(t.page_no), float(t.bbox[1]) if t.bbox else 0.0, str(t.table_id)))
@@ -2916,10 +3072,6 @@ def process_pdf(
 
         # table/cell 복구로도 남는 결번은 fields(page_lines) 기반으로 추가 복구
         if missing_set:
-            pages_in_group = sorted({p for p in land_registry_pages if g.start_page <= p <= g.end_page})
-            if not pages_in_group:
-                pages_in_group = list(range(g.start_page, g.end_page + 1))
-
             rec_fields = _recover_rows_from_page_lines_by_missing_mains(
                 all_page_lines=all_page_lines,
                 pages=pages_in_group,
@@ -2947,6 +3099,20 @@ def process_pdf(
             g.eul_df = merged[[c for c in cols if c in merged.columns]]
 
         if debug:
+            provenance_tables = [
+                t for t in cand_tables
+                if _is_potential_eul_source_table(t, section_hint_by_table, all_page_lines.get(t.page_no, []))
+            ]
+            debug_info["eul_source_provenance"].extend(
+                _collect_missing_rank_source_provenance(
+                    group_key=g.key,
+                    target_mains=missing_mains,
+                    final_eul_df=g.eul_df if isinstance(g.eul_df, pd.DataFrame) else pd.DataFrame(),
+                    candidate_tables=provenance_tables,
+                    pages_in_group=pages_in_group,
+                    all_page_lines=all_page_lines,
+                )
+            )
             debug_info["eul_gap_recovery"].append(
                 {
                     "group_key": g.key,
@@ -3253,6 +3419,11 @@ def _render_debug_info(debug_info: Dict[str, Any]):
         if isinstance(eul_fields_recovery, list) and len(eul_fields_recovery) > 0:
             st.markdown("#### 을구 fields 라인 복구 로그")
             st.dataframe(pd.DataFrame(eul_fields_recovery), use_container_width=True, hide_index=True)
+
+        eul_source_provenance = debug_info.get("eul_source_provenance", [])
+        if isinstance(eul_source_provenance, list) and len(eul_source_provenance) > 0:
+            st.markdown("#### 을구 원응답 출처 진단")
+            st.dataframe(pd.DataFrame(eul_source_provenance), use_container_width=True, hide_index=True)
 
         jumps = debug_info.get("rank_jump_warnings", [])
         if isinstance(jumps, list) and len(jumps) > 0:
