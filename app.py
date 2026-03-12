@@ -2226,6 +2226,136 @@ def _recover_rows_from_table_by_missing_mains(
     return _sort_sec_df_by_rank(out)
 
 
+def _extract_date_phrases(text: str) -> List[str]:
+    if not text:
+        return []
+    # 예: 2005년5월20일 제65032호 / 2005년5월20일 해지
+    pat = re.compile(
+        r"\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일(?:\s*(?:제\s*)?\d+\s*호)?(?:\s*(?:해지|설정계약|변경|말소|상호변경))?"
+    )
+    out = [re.sub(r"\s+", " ", m.group(0)).strip() for m in pat.finditer(text)]
+    # 순서 유지 unique
+    seen = set()
+    uniq: List[str] = []
+    for x in out:
+        if x in seen:
+            continue
+        seen.add(x)
+        uniq.append(x)
+    return uniq
+
+
+def _purpose_from_rank_line(rank: str, line_text: str) -> str:
+    s = (line_text or "").strip()
+    if not s:
+        return ""
+    # rank prefix 제거
+    s = re.sub(r"^\s*" + re.escape(rank) + r"\s*", "", s).strip()
+    if not s:
+        return ""
+    # 날짜 구문 전까지를 등기목적으로 간주
+    m = re.search(r"\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일", s)
+    if m:
+        s = s[:m.start()].strip()
+    return s
+
+
+def _recover_rows_from_page_lines_by_missing_mains(
+    all_page_lines: Dict[int, List[PageLine]],
+    pages: List[int],
+    missing_main_set: set,
+    *,
+    section: str,
+) -> pd.DataFrame:
+    """
+    fields 기반(line) 결번 복구.
+    - table 복구 이후에도 남는 결번(예: 3,4)을 page_lines에서 다시 탐색.
+    """
+    if not missing_main_set:
+        return pd.DataFrame()
+
+    records: List[Dict[str, Any]] = []
+
+    rank_start_re = re.compile(r"^\s*(\d+(?:-\d+)?(?:\s*\([^)]*\))?)\b")
+
+    for p in pages:
+        lines = all_page_lines.get(p, [])
+        if not lines:
+            continue
+
+        txts = [str(ln.text or "").strip() for ln in lines]
+        n = len(txts)
+        i = 0
+        while i < n:
+            line = txts[i]
+            m = rank_start_re.match(line)
+            if not m:
+                i += 1
+                continue
+
+            rank = _normalize_rank_text(m.group(1) or "")
+            main_no = _rank_main_no(rank)
+            if not rank or main_no is None or main_no not in missing_main_set:
+                i += 1
+                continue
+
+            # 현재 rank 블록 수집 (다음 rank 시작 전까지)
+            j = i + 1
+            while j < n:
+                if rank_start_re.match(txts[j]):
+                    break
+                j += 1
+
+            block_lines = [t for t in txts[i:j] if t]
+            block_text = "\n".join(block_lines).strip()
+            if not block_text:
+                i = j
+                continue
+
+            purpose = _purpose_from_rank_line(rank, block_lines[0] if block_lines else "")
+            date_phrases = _extract_date_phrases(block_text)
+            acc = date_phrases[0] if len(date_phrases) >= 1 else ""
+            cause = date_phrases[1] if len(date_phrases) >= 2 else ""
+
+            holder = block_text
+            holder = re.sub(r"^\s*" + re.escape(rank) + r"\s*", "", holder).strip()
+            if purpose:
+                holder = holder.replace(purpose, "", 1).strip()
+            if acc:
+                holder = holder.replace(acc, "", 1).strip()
+            if cause:
+                holder = holder.replace(cause, "", 1).strip()
+            holder = re.sub(r"\n{2,}", "\n", holder).strip()
+
+            ptype = _purpose_type(purpose + " " + holder)
+            if section == "을구" and ptype == "gab":
+                i = j
+                continue
+            if section == "갑구" and ptype == "eul":
+                i = j
+                continue
+
+            records.append(
+                {
+                    "페이지": p,
+                    "table_id": f"fields_p{p}_r{i+1}",
+                    "순위번호": rank,
+                    "등기목적": purpose,
+                    "접수": acc,
+                    "등기원인": cause,
+                    "권리자 및 기타사항": holder,
+                }
+            )
+
+            i = j
+
+    out = pd.DataFrame(records)
+    if out.empty:
+        return out
+    out = out.drop_duplicates()
+    return _sort_sec_df_by_rank(out)
+
+
 def process_pdf(
     file_bytes: bytes,
     api_url: str,
@@ -2259,6 +2389,7 @@ def process_pdf(
         "section_skipped_tables": [],
         "section_accepted_tables": [],
         "eul_gap_recovery": [],
+        "eul_fields_recovery": [],
         "group_ranges": [],
         "rank_jump_warnings": [],
     }
@@ -2508,6 +2639,8 @@ def process_pdf(
 
         missing_set = set(missing_mains)
         recovered_parts: List[pd.DataFrame] = []
+        fields_recovered_rows = 0
+        fields_recovered_ranks: List[str] = []
 
         cand_tables = [t for t in tables_for_registry if g.start_page <= t.page_no <= g.end_page]
         cand_tables.sort(key=lambda t: (int(t.page_no), float(t.bbox[1]) if t.bbox else 0.0, str(t.table_id)))
@@ -2550,6 +2683,31 @@ def process_pdf(
             }
             missing_set -= recovered_main
 
+        # table/cell 복구로도 남는 결번은 fields(page_lines) 기반으로 추가 복구
+        if missing_set:
+            pages_in_group = sorted({p for p in land_registry_pages if g.start_page <= p <= g.end_page})
+            if not pages_in_group:
+                pages_in_group = list(range(g.start_page, g.end_page + 1))
+
+            rec_fields = _recover_rows_from_page_lines_by_missing_mains(
+                all_page_lines=all_page_lines,
+                pages=pages_in_group,
+                missing_main_set=set(missing_set),
+                section="을구",
+            )
+            if not rec_fields.empty:
+                recovered_parts.append(rec_fields)
+                fields_recovered_rows = int(len(rec_fields))
+                fields_recovered_ranks = [
+                    str(x).strip()
+                    for x in rec_fields.get("순위번호", pd.Series(dtype=str)).tolist()
+                    if str(x).strip()
+                ]
+                rec_main_fields = {
+                    m for m in (_rank_main_no(v) for v in rec_fields.get("순위번호", pd.Series(dtype=str)).tolist()) if m is not None
+                }
+                missing_set -= rec_main_fields
+
         if recovered_parts:
             base = g.eul_df if isinstance(g.eul_df, pd.DataFrame) else pd.DataFrame()
             merged = pd.concat([base] + recovered_parts, ignore_index=True).drop_duplicates()
@@ -2565,6 +2723,14 @@ def process_pdf(
                     "remaining_missing_main_ranks": sorted(missing_set),
                     "recovered_parts": len(recovered_parts),
                     "candidate_tables_in_range": len(cand_tables),
+                }
+            )
+            debug_info["eul_fields_recovery"].append(
+                {
+                    "group_key": g.key,
+                    "fields_recovered_rows": fields_recovered_rows,
+                    "fields_recovered_ranks": fields_recovered_ranks,
+                    "remaining_missing_main_ranks_after_fields": sorted(missing_set),
                 }
             )
 
@@ -2849,6 +3015,11 @@ def _render_debug_info(debug_info: Dict[str, Any]):
         if isinstance(eul_recovery, list) and len(eul_recovery) > 0:
             st.markdown("#### 을구 결번 복구 로그")
             st.dataframe(pd.DataFrame(eul_recovery), use_container_width=True, hide_index=True)
+
+        eul_fields_recovery = debug_info.get("eul_fields_recovery", [])
+        if isinstance(eul_fields_recovery, list) and len(eul_fields_recovery) > 0:
+            st.markdown("#### 을구 fields 라인 복구 로그")
+            st.dataframe(pd.DataFrame(eul_fields_recovery), use_container_width=True, hide_index=True)
 
         jumps = debug_info.get("rank_jump_warnings", [])
         if isinstance(jumps, list) and len(jumps) > 0:
