@@ -2226,6 +2226,163 @@ def _recover_rows_from_table_by_missing_mains(
     return _sort_sec_df_by_rank(out)
 
 
+def _recover_rows_from_cells_by_missing_mains(
+    t: ParsedTable,
+    missing_main_set: set,
+    *,
+    section: str,
+    col_map: Optional[Dict[str, int]] = None,
+) -> pd.DataFrame:
+    """
+    rowIndex가 틀어진 경우를 대비해 cell bbox의 y 위치로 행을 다시 묶어 복구.
+    - 셀은 존재하지만 OCR rowIndex가 잘못 잡혀 3,4행이 사라지는 케이스를 노린다.
+    """
+    if not missing_main_set or not t.cells or t.n_cols < 2:
+        return pd.DataFrame()
+
+    cm = dict(col_map or {})
+    c_rank = max(0, min(int(cm.get("rank", 0)), t.n_cols - 1))
+    c_purpose = max(0, min(int(cm.get("purpose", min(1, t.n_cols - 1))), t.n_cols - 1))
+    c_acc = max(0, min(int(cm.get("acceptance", min(2, t.n_cols - 1))), t.n_cols - 1))
+    c_cause = max(0, min(int(cm.get("cause", min(3, t.n_cols - 1))), t.n_cols - 1))
+    c_holder = max(0, min(int(cm.get("holder", min(4, t.n_cols - 1))), t.n_cols - 1))
+
+    cells = [pc for pc in t.cells if pc.bbox and (pc.text or "").strip()]
+    if not cells:
+        return pd.DataFrame()
+
+    heights = sorted((float(pc.bbox[3]) - float(pc.bbox[1])) for pc in cells if pc.bbox)
+    if heights:
+        h_med = heights[len(heights) // 2]
+        y_thresh = max(12.0, min(28.0, h_med * 0.7))
+    else:
+        y_thresh = 18.0
+
+    line_items: List[Tuple[float, float, ParsedCell]] = []
+    for pc in cells:
+        x0, y0, x1, y1 = pc.bbox or (0.0, 0.0, 0.0, 0.0)
+        y_mid = (float(y0) + float(y1)) / 2.0
+        line_items.append((y_mid, float(x0), pc))
+
+    line_items.sort(key=lambda x: (x[0], x[1]))
+
+    clusters: List[List[Tuple[float, float, ParsedCell]]] = []
+    cur: List[Tuple[float, float, ParsedCell]] = []
+    cur_y: Optional[float] = None
+
+    def flush_cluster():
+        nonlocal cur, cur_y
+        if cur:
+            clusters.append(cur)
+        cur = []
+        cur_y = None
+
+    for y_mid, x0, pc in line_items:
+        if cur and cur_y is not None and abs(y_mid - cur_y) > y_thresh:
+            flush_cluster()
+        cur.append((y_mid, x0, pc))
+        if cur_y is None:
+            cur_y = y_mid
+        else:
+            cur_y = (cur_y * (len(cur) - 1) + y_mid) / len(cur)
+    flush_cluster()
+
+    records: List[Dict[str, Any]] = []
+    seen_ranks: set = set()
+
+    for cluster in clusters:
+        row = ["" for _ in range(t.n_cols)]
+        by_col: Dict[int, List[Tuple[float, str]]] = {}
+
+        for _y_mid, x0, pc in cluster:
+            if not (0 <= int(pc.col) < t.n_cols):
+                continue
+            txt = (pc.text or "").strip()
+            if not txt:
+                continue
+            by_col.setdefault(int(pc.col), []).append((x0, txt))
+
+        for c, parts in by_col.items():
+            parts.sort(key=lambda x: x[0])
+            uniq_parts: List[str] = []
+            seen_parts: set = set()
+            for _x0, txt in parts:
+                if txt in seen_parts:
+                    continue
+                seen_parts.add(txt)
+                uniq_parts.append(txt)
+            row[c] = "\n".join(uniq_parts).strip()
+
+        if not any((v or "").strip() for v in row):
+            continue
+
+        rank = _normalize_rank_text(row[c_rank] or "")
+        if not rank:
+            probe_cols = sorted({c_rank, 0, 1, 2} & set(range(t.n_cols)))
+            for c in probe_cols:
+                probe = _normalize_rank_text(row[c] or "")
+                if probe:
+                    rank = probe
+                    break
+                for rk in _extract_rank_candidates(row[c] or ""):
+                    mn = _rank_main_no(rk)
+                    if mn in missing_main_set:
+                        rank = rk
+                        break
+                if rank:
+                    break
+                rk2, _rest = _split_rank_prefix(row[c] or "")
+                if rk2:
+                    rank = rk2
+                    break
+
+        if not rank or rank in seen_ranks:
+            continue
+        if _contains_any(_norm(rank), ["순위번호", "갑구", "을구", "표제부"]):
+            continue
+
+        main_no = _rank_main_no(rank)
+        if main_no is None or main_no not in missing_main_set:
+            continue
+
+        purpose = join_cols(row, c_purpose, c_acc, sep="\n") if c_purpose < c_acc else (row[c_purpose] or "").strip()
+        acc = join_cols(row, c_acc, c_cause, sep="\n") if c_acc < c_cause else (row[c_acc] or "").strip()
+        cause = join_cols(row, c_cause, c_holder, sep="\n") if c_cause < c_holder else (row[c_cause] or "").strip()
+        holder = join_cols(row, c_holder, t.n_cols, sep="\n")
+
+        if not purpose and t.n_cols >= 2:
+            purpose = (row[min(1, t.n_cols - 1)] or "").strip()
+        if not acc and t.n_cols >= 3:
+            acc = (row[min(2, t.n_cols - 1)] or "").strip()
+        if not cause and t.n_cols >= 4:
+            cause = (row[min(3, t.n_cols - 1)] or "").strip()
+
+        ptype = _purpose_type(" ".join([purpose, holder]).strip())
+        if section == "을구" and ptype == "gab":
+            continue
+        if section == "갑구" and ptype == "eul":
+            continue
+
+        records.append(
+            {
+                "페이지": t.page_no,
+                "table_id": f"{t.table_id}_cellcluster",
+                "순위번호": rank,
+                "등기목적": purpose,
+                "접수": acc,
+                "등기원인": cause,
+                "권리자 및 기타사항": holder,
+            }
+        )
+        seen_ranks.add(rank)
+
+    out = pd.DataFrame(records)
+    if out.empty:
+        return out
+    out = out.drop_duplicates()
+    return _sort_sec_df_by_rank(out)
+
+
 def _extract_date_phrases(text: str) -> List[str]:
     if not text:
         return []
@@ -2260,6 +2417,31 @@ def _purpose_from_rank_line(rank: str, line_text: str) -> str:
     return s
 
 
+def _leading_rank_from_line(line_text: str) -> str:
+    """
+    line 맨 앞의 순위번호를 느슨하게 추출.
+    - '3', '3-1', '3(전3)', '3번', '3.' 형태 허용
+    - 연도/금액 오탐(예: 2005) 방지를 위해 main <= 300 제한
+    """
+    s = (line_text or "").strip()
+    if not s:
+        return ""
+
+    m = re.match(r"^\s*(\d{1,4}(?:-\d{1,4})?(?:\s*\([^)]*\))?)", s)
+    if m:
+        rk = _normalize_rank_text(m.group(1) or "")
+        mn = _rank_main_no(rk)
+        if rk and mn is not None and mn <= 300:
+            return rk
+
+    cands = _extract_rank_candidates(s[:16])
+    for rk in cands:
+        mn = _rank_main_no(rk)
+        if mn is not None and mn <= 300:
+            return rk
+    return ""
+
+
 def _recover_rows_from_page_lines_by_missing_mains(
     all_page_lines: Dict[int, List[PageLine]],
     pages: List[int],
@@ -2276,8 +2458,6 @@ def _recover_rows_from_page_lines_by_missing_mains(
 
     records: List[Dict[str, Any]] = []
 
-    rank_start_re = re.compile(r"^\s*(\d+(?:-\d+)?(?:\s*\([^)]*\))?)\b")
-
     for p in pages:
         lines = all_page_lines.get(p, [])
         if not lines:
@@ -2288,12 +2468,11 @@ def _recover_rows_from_page_lines_by_missing_mains(
         i = 0
         while i < n:
             line = txts[i]
-            m = rank_start_re.match(line)
-            if not m:
+            rank = _leading_rank_from_line(line)
+            if not rank:
                 i += 1
                 continue
 
-            rank = _normalize_rank_text(m.group(1) or "")
             main_no = _rank_main_no(rank)
             if not rank or main_no is None or main_no not in missing_main_set:
                 i += 1
@@ -2302,7 +2481,7 @@ def _recover_rows_from_page_lines_by_missing_mains(
             # 현재 rank 블록 수집 (다음 rank 시작 전까지)
             j = i + 1
             while j < n:
-                if rank_start_re.match(txts[j]):
+                if _leading_rank_from_line(txts[j]):
                     break
                 j += 1
 
@@ -2639,6 +2818,8 @@ def process_pdf(
 
         missing_set = set(missing_mains)
         recovered_parts: List[pd.DataFrame] = []
+        cell_cluster_recovered_rows = 0
+        cell_cluster_recovered_ranks: List[str] = []
         fields_recovered_rows = 0
         fields_recovered_ranks: List[str] = []
 
@@ -2658,9 +2839,9 @@ def process_pdf(
                     continue
                 if by_label == "을구":
                     sec_hint = "을구"
-                elif not _looks_like_sec_continuation_table(t):
-                    continue
                 else:
+                    # OCR이 3~4행만 별도 테이블로 쪼개는 경우를 위해,
+                    # unknown이라도 결번 복구 시도는 허용한다.
                     sec_hint = "을구"
 
             meta = sec_colmap_by_id.get(t.table_id, {})
@@ -2682,6 +2863,56 @@ def process_pdf(
                 m for m in (_rank_main_no(v) for v in rec.get("순위번호", pd.Series(dtype=str)).tolist()) if m is not None
             }
             missing_set -= recovered_main
+
+            if missing_set:
+                rec_cells = _recover_rows_from_cells_by_missing_mains(
+                    t,
+                    missing_set,
+                    section="을구",
+                    col_map=cmap,
+                )
+                if not rec_cells.empty:
+                    recovered_parts.append(rec_cells)
+                    cell_cluster_recovered_rows += int(len(rec_cells))
+                    cell_cluster_recovered_ranks.extend(
+                        [str(x).strip() for x in rec_cells.get("순위번호", pd.Series(dtype=str)).tolist() if str(x).strip()]
+                    )
+                    recovered_main_cells = {
+                        m for m in (_rank_main_no(v) for v in rec_cells.get("순위번호", pd.Series(dtype=str)).tolist()) if m is not None
+                    }
+                    missing_set -= recovered_main_cells
+
+        # table row 복구가 비어도, cell bbox만으로는 잡히는 케이스가 있어 한 번 더 시도
+        if missing_set:
+            for t in cand_tables:
+                if not missing_set:
+                    break
+                sec_hint = section_hint_by_table.get(t.table_id, "unknown")
+                if sec_hint == "갑구":
+                    continue
+                if sec_hint == "unknown":
+                    by_label = classify_gab_or_eul(t, all_page_lines.get(t.page_no, []))
+                    if by_label == "갑구":
+                        continue
+                meta = sec_colmap_by_id.get(t.table_id, {})
+                cmap = meta.get("col_map", {}) if isinstance(meta.get("col_map", {}), dict) else {}
+                rec_cells = _recover_rows_from_cells_by_missing_mains(
+                    t,
+                    missing_set,
+                    section="을구",
+                    col_map=cmap,
+                )
+                if rec_cells.empty:
+                    continue
+                recovered_parts.append(rec_cells)
+                cell_cluster_recovered_rows += int(len(rec_cells))
+                cell_cluster_recovered_ranks.extend(
+                    [str(x).strip() for x in rec_cells.get("순위번호", pd.Series(dtype=str)).tolist() if str(x).strip()]
+                )
+                recovered_main_cells = {
+                    m for m in (_rank_main_no(v) for v in rec_cells.get("순위번호", pd.Series(dtype=str)).tolist()) if m is not None
+                }
+                missing_set -= recovered_main_cells
 
         # table/cell 복구로도 남는 결번은 fields(page_lines) 기반으로 추가 복구
         if missing_set:
@@ -2723,6 +2954,8 @@ def process_pdf(
                     "remaining_missing_main_ranks": sorted(missing_set),
                     "recovered_parts": len(recovered_parts),
                     "candidate_tables_in_range": len(cand_tables),
+                    "cell_cluster_recovered_rows": cell_cluster_recovered_rows,
+                    "cell_cluster_recovered_ranks": sorted(set(cell_cluster_recovered_ranks)),
                 }
             )
             debug_info["eul_fields_recovery"].append(
