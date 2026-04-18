@@ -582,15 +582,18 @@ def normalize_section_block(dataframe: pd.DataFrame) -> pd.DataFrame:
 def split_dataframe_by_section_markers(
     dataframe: pd.DataFrame,
     fallback_section: str | None,
-) -> tuple[list[dict], str | None]:
+    starts_new_table: bool = False,
+) -> tuple[list[dict], str | None, bool]:
     if dataframe.empty and len(dataframe.columns) == 0:
-        return [], fallback_section
+        return [], fallback_section, starts_new_table
 
     blocks = []
     current_section = fallback_section
     last_section = fallback_section
     current_rows = []
     columns = list(dataframe.columns)
+    waiting_new_table = starts_new_table and current_section in TARGET_SECTIONS
+    current_block_starts_new_table = waiting_new_table
 
     for _, row in dataframe.iterrows():
         row_values = [clean_cell_value(value) for value in row.tolist()]
@@ -605,25 +608,32 @@ def split_dataframe_by_section_markers(
                     {
                         "section_name": current_section,
                         "dataframe": pd.DataFrame(current_rows, columns=columns),
+                        "starts_new_table": current_block_starts_new_table,
                     }
                 )
             current_section = detected_section
             last_section = detected_section
             current_rows = []
+            waiting_new_table = True
+            current_block_starts_new_table = True
             continue
 
         if current_section in TARGET_SECTIONS:
             current_rows.append(row_values)
+            if waiting_new_table:
+                waiting_new_table = False
 
     if current_rows and current_section in TARGET_SECTIONS:
         blocks.append(
             {
                 "section_name": current_section,
                 "dataframe": pd.DataFrame(current_rows, columns=columns),
+                "starts_new_table": current_block_starts_new_table,
             }
         )
+        waiting_new_table = False
 
-    return blocks, last_section
+    return blocks, last_section, waiting_new_table
 
 
 def drop_header_like_rows(dataframe: pd.DataFrame, reference_columns: list[str]) -> pd.DataFrame:
@@ -675,6 +685,45 @@ def merge_table_blocks(blocks: list[dict]) -> pd.DataFrame:
     return merged_dataframe
 
 
+def has_visible_dataframe(dataframe: pd.DataFrame) -> bool:
+    return not dataframe.empty or len(dataframe.columns) > 0
+
+
+def make_table_instance(page: int | None = None) -> dict:
+    table_info = {
+        "blocks": [],
+        "pages": set(),
+        "dataframe": pd.DataFrame(),
+        "row_count": 0,
+        "block_count": 0,
+        "page_text": "-",
+    }
+
+    if page is not None:
+        table_info["pages"].add(page)
+
+    return table_info
+
+
+def build_section_dataframe_from_tables(table_items: list[dict]) -> pd.DataFrame:
+    visible_tables = [
+        table_info
+        for table_info in table_items
+        if has_visible_dataframe(table_info["dataframe"])
+    ]
+
+    if not visible_tables:
+        return pd.DataFrame()
+
+    combined_frames = []
+    for table_index, table_info in enumerate(visible_tables, start=1):
+        dataframe = table_info["dataframe"].copy()
+        dataframe.insert(0, "table_no", table_index)
+        combined_frames.append(dataframe)
+
+    return pd.concat(combined_frames, ignore_index=True)
+
+
 #------------------------------
 # 선택 표 추출
 #------------------------------
@@ -708,16 +757,19 @@ def extract_selected_section_tables(result: dict) -> dict:
         section_name: {
             "display_name": SECTION_LABELS[section_name],
             "blocks": [],
+            "tables": [],
             "pages": set(),
             "dataframe": pd.DataFrame(),
             "row_count": 0,
             "block_count": 0,
+            "table_count": 0,
             "page_text": "-",
         }
         for section_name in TARGET_SECTIONS
     }
 
     current_section = None
+    pending_new_table = False
     elements = sorted(
         result.get("elements", []),
         key=lambda element: (
@@ -732,6 +784,7 @@ def extract_selected_section_tables(result: dict) -> dict:
             detected_section = detect_section_from_text(search_text)
             if detected_section is not None:
                 current_section = detected_section
+                pending_new_table = True
             continue
 
         dataframes = extract_table_dataframes(element)
@@ -739,9 +792,10 @@ def extract_selected_section_tables(result: dict) -> dict:
             continue
 
         for dataframe in dataframes:
-            split_blocks, current_section = split_dataframe_by_section_markers(
+            split_blocks, current_section, pending_new_table = split_dataframe_by_section_markers(
                 dataframe,
                 current_section,
+                starts_new_table=pending_new_table,
             )
 
             for block in split_blocks:
@@ -749,6 +803,23 @@ def extract_selected_section_tables(result: dict) -> dict:
                 normalized_dataframe = normalize_section_block(block["dataframe"])
                 if normalized_dataframe.empty and len(normalized_dataframe.columns) == 0:
                     continue
+
+                starts_new_table = block.get("starts_new_table", False)
+                if starts_new_table or not section_tables[section_name]["tables"]:
+                    section_tables[section_name]["tables"].append(
+                        make_table_instance(element.get("page"))
+                    )
+
+                current_table = section_tables[section_name]["tables"][-1]
+                current_table["blocks"].append(
+                    {
+                        "page": element.get("page"),
+                        "dataframe": normalized_dataframe,
+                    }
+                )
+
+                if element.get("page") is not None:
+                    current_table["pages"].add(element.get("page"))
 
                 section_tables[section_name]["blocks"].append(
                     {
@@ -761,10 +832,27 @@ def extract_selected_section_tables(result: dict) -> dict:
                     section_tables[section_name]["pages"].add(element.get("page"))
 
     for section_name, section_info in section_tables.items():
-        merged_dataframe = merge_table_blocks(section_info["blocks"])
-        section_info["dataframe"] = merged_dataframe
-        section_info["row_count"] = len(merged_dataframe.index)
-        section_info["block_count"] = len(section_info["blocks"])
+        valid_tables = []
+        total_rows = 0
+        total_blocks = 0
+
+        for table_info in section_info["tables"]:
+            merged_dataframe = merge_table_blocks(table_info["blocks"])
+            table_info["dataframe"] = merged_dataframe
+            table_info["row_count"] = len(merged_dataframe.index)
+            table_info["block_count"] = len(table_info["blocks"])
+            table_info["page_text"] = format_page_numbers(table_info["pages"])
+
+            if has_visible_dataframe(merged_dataframe):
+                valid_tables.append(table_info)
+                total_rows += table_info["row_count"]
+                total_blocks += table_info["block_count"]
+
+        section_info["tables"] = valid_tables
+        section_info["dataframe"] = build_section_dataframe_from_tables(valid_tables)
+        section_info["row_count"] = total_rows
+        section_info["block_count"] = total_blocks
+        section_info["table_count"] = len(valid_tables)
         section_info["page_text"] = format_page_numbers(section_info["pages"])
 
     return section_tables
@@ -779,22 +867,28 @@ def make_section_excel_bytes(
     section_info: dict,
 ) -> bytes:
     output = io.BytesIO()
-    dataframe = section_info["dataframe"]
-    summary_df = pd.DataFrame(
-        [
-            {
-                "file_name": file_name,
-                "section": section_info["display_name"],
-                "pages": section_info["page_text"],
-                "row_count": section_info["row_count"],
-                "block_count": section_info["block_count"],
-            }
-        ]
-    )
+    summary_rows = []
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for table_index, table_info in enumerate(section_info["tables"], start=1):
+            summary_rows.append(
+                {
+                    "file_name": file_name,
+                    "section": section_info["display_name"],
+                    "table_no": table_index,
+                    "pages": table_info["page_text"],
+                    "row_count": table_info["row_count"],
+                    "block_count": table_info["block_count"],
+                }
+            )
+            table_info["dataframe"].to_excel(
+                writer,
+                sheet_name=f"table_{table_index}",
+                index=False,
+            )
+
+        summary_df = pd.DataFrame(summary_rows)
         summary_df.to_excel(writer, sheet_name="summary", index=False)
-        dataframe.to_excel(writer, sheet_name=section_name, index=False)
 
     return output.getvalue()
 
@@ -806,19 +900,23 @@ def make_combined_excel_bytes(file_name: str, section_tables: dict) -> bytes:
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for section_name in TARGET_SECTIONS:
             section_info = section_tables[section_name]
-            summary_rows.append(
-                {
-                    "file_name": file_name,
-                    "section": section_info["display_name"],
-                    "pages": section_info["page_text"],
-                    "row_count": section_info["row_count"],
-                    "block_count": section_info["block_count"],
-                }
-            )
+            for table_index, table_info in enumerate(section_info["tables"], start=1):
+                summary_rows.append(
+                    {
+                        "file_name": file_name,
+                        "section": section_info["display_name"],
+                        "table_no": table_index,
+                        "pages": table_info["page_text"],
+                        "row_count": table_info["row_count"],
+                        "block_count": table_info["block_count"],
+                    }
+                )
 
-            dataframe = section_info["dataframe"]
-            if not dataframe.empty or len(dataframe.columns) > 0:
-                dataframe.to_excel(writer, sheet_name=section_name, index=False)
+                table_info["dataframe"].to_excel(
+                    writer,
+                    sheet_name=f"{section_name}_{table_index}"[:31],
+                    index=False,
+                )
 
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="summary", index=False)
 
@@ -910,13 +1008,9 @@ if uploaded_pdf is not None:
 
         page_count = get_page_count(result)
         found_section_count = sum(
-            1
+            section_tables[section_name]["table_count"]
             for section_name in TARGET_SECTIONS
             if section_name in section_tables
-            and (
-                not section_tables[section_name]["dataframe"].empty
-                or len(section_tables[section_name]["dataframe"].columns) > 0
-            )
         )
         total_row_count = sum(
             section_tables[section_name]["row_count"]
@@ -948,17 +1042,15 @@ if uploaded_pdf is not None:
 
         for tab, section_name in zip(section_tabs, TARGET_SECTIONS):
             section_info = section_tables.get(section_name)
-            dataframe = section_info["dataframe"] if section_info else pd.DataFrame()
 
             with tab:
-                if section_info is None or (
-                    dataframe.empty and len(dataframe.columns) == 0
-                ):
+                if section_info is None or section_info["table_count"] == 0:
                     st.warning(f"{SECTION_LABELS[section_name]} 표를 찾지 못했습니다.")
                     continue
 
                 st.caption(
                     f"페이지: {section_info['page_text']} | "
+                    f"표 수: {section_info['table_count']} | "
                     f"표 블록 수: {section_info['block_count']} | "
                     f"행 수: {section_info['row_count']}"
                 )
@@ -982,7 +1074,13 @@ if uploaded_pdf is not None:
                     key=f"download_{section_name}_{file_signature}",
                 )
 
-                st.dataframe(dataframe, use_container_width=True)
+                for table_index, table_info in enumerate(section_info["tables"], start=1):
+                    st.caption(
+                        f"{SECTION_LABELS[section_name]} #{table_index} | "
+                        f"페이지: {table_info['page_text']} | "
+                        f"행 수: {table_info['row_count']}"
+                    )
+                    st.dataframe(table_info["dataframe"], use_container_width=True)
 
         with st.expander("OCR 원본 응답 보기"):
             st.json(result)
