@@ -52,6 +52,30 @@ HEADER_ROW_TOKENS = {
     "최종지분",
     "주소",
 }
+SECTION_START_HEADER_TOKENS = {
+    "표제부": {
+        "표시번호",
+        "접수",
+        "소재지번",
+        "지목",
+        "면적",
+        "등기원인및기타사항",
+    },
+    "갑구": {
+        "순위번호",
+        "등기목적",
+        "접수",
+        "등기원인",
+        "권리자및기타사항",
+    },
+    "을구": {
+        "순위번호",
+        "등기목적",
+        "접수",
+        "등기원인",
+        "권리자및기타사항",
+    },
+}
 
 
 #------------------------------
@@ -461,6 +485,57 @@ def is_header_row_values(cells: list[str]) -> bool:
     return token_matches >= 2
 
 
+def matches_section_start_header(cells: list[str], section_name: str) -> bool:
+    normalized_cells = {
+        normalize_compare_text(cell)
+        for cell in cells
+        if normalize_compare_text(cell)
+    }
+    return SECTION_START_HEADER_TOKENS[section_name].issubset(normalized_cells)
+
+
+def find_next_non_empty_row(rows: list[list[str]], start_index: int) -> list[str] | None:
+    for next_index in range(start_index + 1, len(rows)):
+        next_row = rows[next_index]
+        if any(normalize_compare_text(value) for value in next_row):
+            return next_row
+    return None
+
+
+def detect_table_start_marker(
+    rows: list[list[str]],
+    row_index: int,
+    columns: list[str],
+) -> dict | None:
+    row_values = rows[row_index]
+    row_text = row_cells_to_text(row_values)
+    next_row = find_next_non_empty_row(rows, row_index)
+
+    for section_name in TARGET_SECTIONS:
+        if (
+            SECTION_PATTERNS[section_name].search(row_text)
+            and next_row is not None
+            and matches_section_start_header(next_row, section_name)
+        ):
+            return {
+                "section_name": section_name,
+                "skip_current_row": True,
+            }
+
+    columns_text = row_cells_to_text([str(column) for column in columns])
+    for section_name in TARGET_SECTIONS:
+        if (
+            SECTION_PATTERNS[section_name].search(columns_text)
+            and matches_section_start_header(row_values, section_name)
+        ):
+            return {
+                "section_name": section_name,
+                "skip_current_row": False,
+            }
+
+    return None
+
+
 def promote_first_row_to_header_if_needed(dataframe: pd.DataFrame) -> pd.DataFrame:
     if dataframe.empty:
         return dataframe
@@ -594,15 +669,36 @@ def split_dataframe_by_section_markers(
     columns = list(dataframe.columns)
     waiting_new_table = starts_new_table and current_section in TARGET_SECTIONS
     current_block_starts_new_table = waiting_new_table
+    rows = [
+        [clean_cell_value(value) for value in row.tolist()]
+        for _, row in dataframe.iterrows()
+    ]
 
-    for _, row in dataframe.iterrows():
-        row_values = [clean_cell_value(value) for value in row.tolist()]
+    for row_index, row_values in enumerate(rows):
         row_text = row_cells_to_text(row_values)
         if not row_text:
             continue
 
+        start_marker = detect_table_start_marker(rows, row_index, columns)
+        if start_marker is not None:
+            if current_rows and current_section in TARGET_SECTIONS:
+                blocks.append(
+                    {
+                        "section_name": current_section,
+                        "dataframe": pd.DataFrame(current_rows, columns=columns),
+                        "starts_new_table": current_block_starts_new_table,
+                    }
+                )
+            current_section = start_marker["section_name"]
+            last_section = start_marker["section_name"]
+            current_rows = []
+            waiting_new_table = True
+            current_block_starts_new_table = True
+            if start_marker["skip_current_row"]:
+                continue
+
         detected_section = detect_section_from_text(row_text)
-        if detected_section is not None:
+        if detected_section is not None and start_marker is None:
             if current_rows and current_section in TARGET_SECTIONS:
                 blocks.append(
                     {
@@ -614,8 +710,8 @@ def split_dataframe_by_section_markers(
             current_section = detected_section
             last_section = detected_section
             current_rows = []
-            waiting_new_table = True
-            current_block_starts_new_table = True
+            waiting_new_table = False
+            current_block_starts_new_table = False
             continue
 
         if current_section in TARGET_SECTIONS:
@@ -784,7 +880,6 @@ def extract_selected_section_tables(result: dict) -> dict:
             detected_section = detect_section_from_text(search_text)
             if detected_section is not None:
                 current_section = detected_section
-                pending_new_table = True
             continue
 
         dataframes = extract_table_dataframes(element)
