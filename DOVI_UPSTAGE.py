@@ -38,6 +38,20 @@ SECTION_PATTERNS = {
     "갑구": re.compile(r"갑\s*구"),
     "을구": re.compile(r"을\s*구"),
 }
+GENERIC_COLUMN_PATTERN = re.compile(r"^col_\d+$")
+HEADER_ROW_TOKENS = {
+    "순위번호",
+    "등기목적",
+    "접수",
+    "등기원인",
+    "권리자및기타사항",
+    "고유번호",
+    "표시번호",
+    "등기명의인",
+    "주민등록번호",
+    "최종지분",
+    "주소",
+}
 
 
 #------------------------------
@@ -424,6 +438,194 @@ def clean_table_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
     return dataframe
 
 
+def row_cells_to_text(cells: list[str]) -> str:
+    return " ".join(cell for cell in cells if normalize_space(cell)).strip()
+
+
+def is_generic_columns(columns: list[str]) -> bool:
+    if not columns:
+        return False
+    return all(GENERIC_COLUMN_PATTERN.fullmatch(str(column)) for column in columns)
+
+
+def is_header_row_values(cells: list[str]) -> bool:
+    normalized_cells = [
+        normalize_compare_text(cell)
+        for cell in cells
+        if normalize_compare_text(cell)
+    ]
+    if len(normalized_cells) < 2:
+        return False
+
+    token_matches = sum(1 for cell in normalized_cells if cell in HEADER_ROW_TOKENS)
+    return token_matches >= 2
+
+
+def promote_first_row_to_header_if_needed(dataframe: pd.DataFrame) -> pd.DataFrame:
+    if dataframe.empty:
+        return dataframe
+
+    if not is_generic_columns(list(dataframe.columns)):
+        return dataframe
+
+    first_row = [clean_cell_value(value) for value in dataframe.iloc[0].tolist()]
+    if not is_header_row_values(first_row):
+        return dataframe
+
+    promoted_dataframe = dataframe.iloc[1:].reset_index(drop=True).copy()
+    promoted_dataframe.columns = make_unique_columns(first_row)
+    return promoted_dataframe
+
+
+def ensure_minimum_columns(dataframe: pd.DataFrame, minimum_columns: int = 5) -> pd.DataFrame:
+    dataframe = dataframe.copy()
+
+    while len(dataframe.columns) < minimum_columns:
+        next_index = len(dataframe.columns) + 1
+        column_name = f"col_{next_index}"
+        while column_name in dataframe.columns:
+            next_index += 1
+            column_name = f"col_{next_index}"
+        dataframe[column_name] = ""
+
+    return dataframe
+
+
+def extract_leading_number(text: str) -> int | None:
+    match = re.match(r"^\s*(\d+)", text or "")
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def append_with_blank_line(base_text: str, extra_text: str) -> str:
+    base_text = clean_cell_value(base_text)
+    extra_text = clean_cell_value(extra_text)
+
+    if not extra_text:
+        return base_text
+    if not base_text:
+        return extra_text
+    return f"{base_text}\n\n{extra_text}"
+
+
+def row_to_continuation_text(cells: list[str]) -> str:
+    non_empty_cells = [clean_cell_value(cell) for cell in cells if clean_cell_value(cell)]
+    return " | ".join(non_empty_cells)
+
+
+def collapse_continuation_rows(dataframe: pd.DataFrame) -> pd.DataFrame:
+    if dataframe.empty and len(dataframe.columns) == 0:
+        return dataframe
+
+    dataframe = ensure_minimum_columns(dataframe, minimum_columns=5)
+    rows = [
+        [clean_cell_value(value) for value in row.tolist()]
+        for _, row in dataframe.iterrows()
+    ]
+
+    collapsed_rows = []
+    previous_number = None
+
+    for row_index, row in enumerate(rows):
+        if not any(normalize_compare_text(value) for value in row):
+            continue
+
+        if is_header_row_values(row):
+            continue
+
+        current_number = extract_leading_number(row[0]) if row else None
+
+        if row_index == 0 or not collapsed_rows:
+            collapsed_rows.append(row)
+            previous_number = current_number
+            continue
+
+        should_start_new_row = False
+        if current_number is not None:
+            if current_number == 1:
+                should_start_new_row = True
+            elif previous_number is None:
+                should_start_new_row = True
+            elif current_number >= previous_number:
+                should_start_new_row = True
+
+        if should_start_new_row:
+            collapsed_rows.append(row)
+            previous_number = current_number
+            continue
+
+        continuation_text = row_to_continuation_text(row)
+        collapsed_rows[-1][4] = append_with_blank_line(
+            collapsed_rows[-1][4],
+            continuation_text,
+        )
+
+    if not collapsed_rows:
+        return pd.DataFrame(columns=dataframe.columns)
+
+    return pd.DataFrame(collapsed_rows, columns=dataframe.columns)
+
+
+def normalize_section_block(dataframe: pd.DataFrame) -> pd.DataFrame:
+    dataframe = clean_table_dataframe(dataframe)
+    if dataframe.empty and len(dataframe.columns) == 0:
+        return dataframe
+
+    dataframe = promote_first_row_to_header_if_needed(dataframe)
+    dataframe = clean_table_dataframe(dataframe)
+    dataframe = collapse_continuation_rows(dataframe)
+    dataframe = clean_table_dataframe(dataframe)
+    return dataframe
+
+
+def split_dataframe_by_section_markers(
+    dataframe: pd.DataFrame,
+    fallback_section: str | None,
+) -> tuple[list[dict], str | None]:
+    if dataframe.empty and len(dataframe.columns) == 0:
+        return [], fallback_section
+
+    blocks = []
+    current_section = fallback_section
+    last_section = fallback_section
+    current_rows = []
+    columns = list(dataframe.columns)
+
+    for _, row in dataframe.iterrows():
+        row_values = [clean_cell_value(value) for value in row.tolist()]
+        row_text = row_cells_to_text(row_values)
+        if not row_text:
+            continue
+
+        detected_section = detect_section_from_text(row_text)
+        if detected_section is not None:
+            if current_rows and current_section in TARGET_SECTIONS:
+                blocks.append(
+                    {
+                        "section_name": current_section,
+                        "dataframe": pd.DataFrame(current_rows, columns=columns),
+                    }
+                )
+            current_section = detected_section
+            last_section = detected_section
+            current_rows = []
+            continue
+
+        if current_section in TARGET_SECTIONS:
+            current_rows.append(row_values)
+
+    if current_rows and current_section in TARGET_SECTIONS:
+        blocks.append(
+            {
+                "section_name": current_section,
+                "dataframe": pd.DataFrame(current_rows, columns=columns),
+            }
+        )
+
+    return blocks, last_section
+
+
 def drop_header_like_rows(dataframe: pd.DataFrame, reference_columns: list[str]) -> pd.DataFrame:
     if dataframe.empty:
         return dataframe
@@ -525,15 +727,11 @@ def extract_selected_section_tables(result: dict) -> dict:
     )
 
     for element in elements:
-        search_text = get_element_search_text(element)
-        detected_section = detect_section_from_text(search_text)
-        if detected_section is not None:
-            current_section = detected_section
-
         if not is_table_element(element):
-            continue
-
-        if current_section not in section_tables:
+            search_text = get_element_search_text(element)
+            detected_section = detect_section_from_text(search_text)
+            if detected_section is not None:
+                current_section = detected_section
             continue
 
         dataframes = extract_table_dataframes(element)
@@ -541,19 +739,26 @@ def extract_selected_section_tables(result: dict) -> dict:
             continue
 
         for dataframe in dataframes:
-            cleaned_dataframe = clean_table_dataframe(dataframe)
-            if cleaned_dataframe.empty and len(cleaned_dataframe.columns) == 0:
-                continue
-
-            section_tables[current_section]["blocks"].append(
-                {
-                    "page": element.get("page"),
-                    "dataframe": cleaned_dataframe,
-                }
+            split_blocks, current_section = split_dataframe_by_section_markers(
+                dataframe,
+                current_section,
             )
 
-            if element.get("page") is not None:
-                section_tables[current_section]["pages"].add(element.get("page"))
+            for block in split_blocks:
+                section_name = block["section_name"]
+                normalized_dataframe = normalize_section_block(block["dataframe"])
+                if normalized_dataframe.empty and len(normalized_dataframe.columns) == 0:
+                    continue
+
+                section_tables[section_name]["blocks"].append(
+                    {
+                        "page": element.get("page"),
+                        "dataframe": normalized_dataframe,
+                    }
+                )
+
+                if element.get("page") is not None:
+                    section_tables[section_name]["pages"].add(element.get("page"))
 
     for section_name, section_info in section_tables.items():
         merged_dataframe = merge_table_blocks(section_info["blocks"])
